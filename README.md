@@ -52,6 +52,76 @@ pip install -r requirements.txt
 cp .env.example .env   # ANTHROPIC_API_KEY 채우기
 ```
 
+> 시스템에 Python이 여러 개 설치되어 있으면(pyenv, Homebrew 등) `uvicorn: command not found`나
+> `No module named ...` 오류가 날 수 있다. 항상 위 venv를 `source venv/bin/activate`로
+> 활성화한 터미널에서 명령을 실행할 것 — 새 터미널 탭을 열 때마다 다시 활성화해야 한다.
+
+## 로컬에서 데모 배포하기
+
+데모는 단일 SQLite 파일(`WIKI_AGENT_DB`)을 데이터 저장소로 쓴다. **채팅을 보낸 DB와
+갱신 사이클을 돌리는 DB가 반드시 같은 파일이어야** 위키 갱신이 보인다 — 둘이 다르면
+사이클이 빈 로그를 보고 `mined gaps: 0`을 낸다.
+
+### A. uvicorn으로 직접 실행
+
+```bash
+WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
+```
+
+브라우저에서 http://localhost:8000 접속 → 채팅 UI에서 질문 전송.
+
+### B. Docker로 실행
+
+```bash
+docker build -t wiki-agent-demo .
+mkdir -p ./data
+docker run -p 8000:8000 \
+  -e WIKI_AGENT_DB=/data/wiki_agent.db \
+  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  -v $(pwd)/data:/data \
+  wiki-agent-demo
+```
+
+`-v` 볼륨 마운트 없이 실행하면 컨테이너를 내릴 때 DB가 함께 사라진다. 이후 같은 DB로
+갱신 사이클을 돌리려면 컨테이너 밖에서 `WIKI_AGENT_DB=$(pwd)/data/wiki_agent.db`로
+같은 파일을 가리켜야 한다(아래 "위키 자가 갱신 확인하기" 참고).
+
+## 위키 자가 갱신 확인하기 (LLM Wiki + RAG 결합 데모)
+
+이 프로젝트의 핵심 서사 — "대화 로그가 위키를 스스로 갱신한다" — 를 직접 눈으로
+확인하는 절차다. `core/pipeline/mine.py`의 `mine_gaps()`는 **정확히 같은 문구**의
+질문이 **3번 이상**(`min_freq`) 반복되고, 그 질문의 검색 신뢰도(cross-encoder rerank
+점수)가 **평균적으로 음수**(`score_threshold=0.0` 미만)일 때만 "위키에 없는 주제"로
+탐지한다. 둘 다 만족해야 한다 — 빈도만 채우거나 점수만 낮아서는 안 된다.
+
+1. 데모 채팅(A 또는 B)에서, **현재 위키 5개 주제(재시도, rate limiting, connection
+   pooling, circuit breaker, idempotency)와 무관한** 질문 하나를 골라 **정확히 같은
+   문구로 3번 이상** 전송한다(복사-붙여넣기로, 패러프레이즈하지 말 것). 예:
+   `"How do I implement pagination for a large dataset?"`
+2. 채팅에 쓴 것과 **같은** `WIKI_AGENT_DB` 경로로 갱신 사이클을 1회 실행한다:
+   ```bash
+   WIKI_AGENT_DB=/tmp/demo.db python3 scripts/run_update_cycle.py
+   ```
+3. stdout에서 `mined gaps`(1 이상), `shadow written`(새 entry_id), `promote`
+   (`promoted=True/False`, `activated=[...]`)를 확인한다.
+4. DB에서 직접 결과를 본다:
+   ```bash
+   sqlite3 -separator " | " /tmp/demo.db \
+     "select entry_id, topic, status, provenance from wiki_entry order by updated_at desc limit 10;"
+   ```
+   새 엔트리가 `status='shadow'`로만 있으면 게이트는 통과했지만 아직 평가 회귀
+   때문에 승격 전이고, `status='active'`면 회귀 없이 승격까지 끝난 것이다.
+5. 같은 질문을 다시 데모 채팅에서 물어보면, 새로 승격된 엔트리를 근거로 답하는 것을
+   확인할 수 있다.
+
+**참고 — `promoted`가 실행마다 바뀔 수 있다.** `promote`가 비교하는 `correctness`
+지표는 매 실행마다 실제 LLM 호출(`generate` + judge)로 채점하는 비결정적 지표라서,
+같은 후보를 같은 사이클로 다시 돌려도 `correctness`가 ±1문항(골드셋 20문항 기준
+0.05) 정도 흔들릴 수 있다. `recall@k`/`mrr`는 결정적이므로 그쪽이 변한다면 진짜
+회귀다. `correctness`만 바뀌었다면 노이즈일 가능성이 높다 — 회귀 차단 자체는
+설계대로 보수적으로 동작하는 것이니, 승격이 안 됐다고 사이클 자체가 실패한 게
+아니다.
+
 ## 명령
 
 | 목적 | 명령 |
