@@ -26,30 +26,41 @@
 
 ```
 wiki-agent/
-├── core/                  # ★ 직접 구현 (포폴 핵심)
-│   ├── db.py              # 스키마/커넥션
-│   ├── retrieval.py       # 하이브리드 검색 + rerank
-│   ├── schemas.py         # pydantic 모델(엔트리/로그/patch)
-│   └── pipeline/          # ★ 피드백 루프
+├── core/                    # ★ 직접 구현 (포폴 핵심)
+│   ├── wiki_store.py        # 스키마/커넥션/CRUD (SQLite+FTS5, pydantic 없이 표준 라이브러리만)
+│   ├── retrieval.py         # 하이브리드 검색(BM25+dense+RRF) + cross-encoder rerank
+│   └── pipeline/            # ★ 피드백 루프
 │       ├── ingest.py
-│       ├── mine.py        # gap / fact / correction
-│       ├── curate.py      # LLM → 구조화 patch
-│       ├── gate.py        # 오염 방지 게이트
-│       ├── reindex.py
-│       └── promote.py     # shadow→active + 롤백
+│       ├── mine.py          # gap 탐지(fact/correction은 의도적으로 미구현 — mine.py 주석 참고)
+│       ├── curate.py        # LLM → 구조화 patch
+│       ├── gate.py          # 오염 방지 게이트
+│       ├── reindex.py       # 현재는 no-op(영속 임베딩 캐시 없음)
+│       └── promote.py       # shadow→active + 롤백(=커밋 안 함)
 ├── eval/
-│   ├── gold_set.jsonl     # 동결
-│   └── run_eval.py        # recall@k, correctness ...
+│   ├── gold_set.jsonl       # 동결
+│   ├── run_eval.py          # recall@k, mrr, correctness(LLM-as-judge)
+│   └── baseline.json        # 기준 점수(--save-baseline 없이는 보존)
 ├── serving/
-│   └── mcp_server.py      # RAG를 MCP 도구로 노출 (+로깅)
+│   └── mcp_server.py        # RAG를 MCP 도구로 노출 (search_wiki, submit_feedback)
+├── demo/                    # MCP 외 진입점 — 사람이 직접 써보는 FastAPI 채팅 데모
+│   ├── app.py
+│   └── static/index.html
 ├── scripts/
-│   └── run_update_cycle.py # 파이프라인 1사이클 오케스트레이션
-├── hermes/                # Hermes 설정/연결 (글루)
-└── infra/                 # docker-compose, terraform 등
+│   └── run_update_cycle.py  # 파이프라인 1사이클 오케스트레이션
+├── tests/                   # pytest (기본 오프라인, RUN_SLOW_TESTS=1로 느린 테스트 포함)
+├── conftest.py
+├── Dockerfile                # infra/ 디렉터리 없이 루트 Dockerfile 하나로 데모 컨테이너화
+└── test_client.py            # mcp 없이 서빙 로직만 검증
 ```
 
 > 레포 폴더명은 `wiki-agent`(하이픈), Python import 패키지는 하이픈을 못 쓰므로
 > `core` · `serving` 같은 무하이픈 모듈명을 그대로 사용한다.
+
+> 위 트리는 실제 구현 기준이다. 이 가이드를 처음 쓸 때 구상했던 `core/db.py`+`core/schemas.py`
+> 분리, `hermes/`(Hermes 설정), `infra/`(docker-compose·terraform)는 실제로는 만들지
+> 않았다 — MVP 스코프에서 `core/wiki_store.py` 하나로 합치고, Hermes 연결은 레포 밖
+> `~/.hermes/config.yaml`로, 배포는 루트 `Dockerfile` 하나로 충분히 끝났기 때문이다.
+> 아래 빌드 순서 설명의 파일 경로보다 위 트리를 신뢰할 것.
 
 ---
 

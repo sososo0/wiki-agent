@@ -118,10 +118,25 @@ sqlite3 /ABS/PATH/wiki-agent/wiki_agent.db \
 
 ---
 
+## 구현 완료
+
+이 런북 작성 당시엔 "다음에 깊게 팔 후보"였으나 이후 모두 구현됐다(상세는 README의
+"현재 상태" 참고).
+
+- **dense 검색**: `core/retrieval.py` — BM25 + dense 임베딩 + RRF + cross-encoder rerank.
+- **피드백 파이프라인 1사이클**: `core/pipeline/` — gap 탐지 → 큐레이션 → 게이트 → shadow
+  반영, `scripts/run_update_cycle.py`로 오케스트레이션.
+- **평가 게이트**: `core/pipeline/promote.py` — 골드셋으로 base/candidate 평가 후 회귀
+  없을 때만 승격(`promote_if_better`), 회귀 시 커밋 안 함.
+
+이 RUNBOOK이 다루는 MCP/Hermes 서빙 경로 외에, 사람이 직접 써볼 수 있는 FastAPI 데모
+웹앱(`demo/app.py`)도 별도 진입점으로 추가됐다. 로컬 배포 방법과 위키 자가 갱신을 직접
+확인하는 절차는 README의 "로컬에서 데모 배포하기" / "위키 자가 갱신 확인하기" 참고.
+
 ## 다음에 깊게 팔 후보
 
-1. **dense 검색 추가**: `wiki_store.search_wiki`에 임베딩 벡터 검색 + RRF 하이브리드 결합
-   (한국어 코퍼스라면 사실상 필수).
-2. **피드백 파이프라인 1사이클**: `retrieval_log` + `feedback`로 gap 탐지 → 큐레이션 →
-   게이트 → shadow 반영을 실제 데이터로 구현.
-3. **평가 게이트**: 골드셋으로 shadow vs active 비교 후 자동 승격/롤백.
+1. **사이클 자동 트리거**: 지금은 `run_update_cycle.py`를 수동으로 1회 실행하는 것까지만
+   구현됨. Hermes cron으로 주기 실행(예: `hermes cron add --schedule "0 2 * * *" --cmd
+   "python scripts/run_update_cycle.py"`)하는 오케스트레이션은 아직 없음.
+2. **공개 환경에서의 안전한 자가 갱신**: 갱신 파이프라인 자체는 동작하지만, shadow로 쌓아두고
+   사람이 승인해야 active로 가는 워크플로는 아직 없음 — 지금은 평가 회귀만으로 자동 승격됨.

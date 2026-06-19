@@ -1,4 +1,4 @@
-# LiveWiki: 자가 갱신형 에이전트 RAG 시스템 설계서
+# Wiki Agent: 자가 갱신형 에이전트 RAG 시스템 설계서
 
 > 대화 로그를 분석해 "LLM이 큐레이션하는 위키"를 자동으로 갱신하고,
 > 그 결과 RAG 성능이 갱신 사이클마다 측정 가능하게 향상되는 self-improving 지식 시스템.
@@ -27,33 +27,35 @@
 ## 1. 전체 아키텍처
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │              SERVING (실시간)               │
-   사용자 ──질문──▶ │  Agent (tool-calling)                      │
-       ▲            │     │                                       │
-       │            │     ├─▶ retrieve(query) ─▶ Vector DB ◀──┐   │
-       │            │     │                      (Wiki index)  │  │
-       └── 답변 ◀── │     └─▶ generate(answer + citations)     │  │
-                    └───────────────│──────────────────────────│──┘
-                                    │ (모든 상호작용 로깅)        │
-                                    ▼                          재색인
-                    ┌──────────────────────────────────────────┐ │
-                    │           LOG STORE (append-only)          │ │
-                    │  conversations / retrievals / feedback     │ │
-                    └──────────────────│───────────────────────┘ │
-                                       ▼                          │
-                    ┌──────────────────────────────────────────┐ │
-                    │     FEEDBACK LOOP PIPELINE (배치/스케줄)     │ │
-                    │  1. Ingest   2. Mine(gap/fact/fix)          │ │
-                    │  3. Curate(LLM)  4. Quality Gate            │ │
-                    │  5. Reindex ─────────────────────────────────┘
-                    │  6. Eval & Promote (canary → prod)         │
-                    └──────────────────│───────────────────────┘
-                                       ▼
-                    ┌──────────────────────────────────────────┐
-                    │   WIKI STORE (버전·출처·신뢰도 메타데이터)    │
-                    │   + EVAL GOLD SET (회귀 탐지용)              │
-                    └──────────────────────────────────────────┘
+사용자
+  │ 질문
+  ▼
+① SERVING (실시간)
+    Agent(tool-calling)
+    retrieve(query) ──────────────▶ Wiki Store (④)
+    generate(answer + citations) ─▶ 사용자
+  │
+  │ 모든 상호작용 로깅
+  ▼
+② LOG STORE (append-only)
+    conversations / retrievals / feedback
+  │
+  ▼
+③ FEEDBACK LOOP PIPELINE (배치/스케줄)
+    1. Ingest
+    2. Mine          gap / fact / correction
+    3. Curate        LLM
+    4. Quality Gate
+    5. Reindex
+    6. Eval & Promote   canary → prod
+  │
+  │ 회귀 없을 때만 승격
+  ▼
+④ WIKI STORE
+    버전 · 출처 · 신뢰도 메타데이터
+    + EVAL GOLD SET (회귀 탐지 기준)
+  │
+  └──▶ ①의 retrieve 대상으로 순환 (재색인) — 루프가 닫힌다
 ```
 
 핵심: **Serving 경로**(실시간)와 **Feedback Loop**(배치)를 분리한다. 위키는 버전이 있는
