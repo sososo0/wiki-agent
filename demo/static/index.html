@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>wiki-agent demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  #log { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; min-height: 200px; }
+  .msg { padding: 10px 14px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: #2563eb; color: white; }
+  .msg.bot { align-self: flex-start; background: #f1f5f9; color: #111; }
+  .sources { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .feedback button { border: none; background: none; cursor: pointer; font-size: 16px; opacity: 0.5; }
+  .feedback button:hover { opacity: 1; }
+  form { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; }
+  button[type=submit] { padding: 10px 16px; border: none; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; }
+</style>
+</head>
+<body>
+  <h2>wiki-agent demo</h2>
+  <div id="log"></div>
+  <form id="chat-form">
+    <input id="input" type="text" placeholder="질문을 입력하세요..." autocomplete="off" required>
+    <button type="submit">보내기</button>
+  </form>
+
+<script>
+  const convId = crypto.randomUUID();
+  let turnId = 0;
+  const log = document.getElementById("log");
+  const form = document.getElementById("chat-form");
+  const input = document.getElementById("input");
+
+  function addMessage(role, text) {
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    div.textContent = text;
+    log.appendChild(div);
+    return div;
+  }
+
+  function addBotMessage(answer, retrieved, turn) {
+    const div = addMessage("bot", answer);
+
+    if (retrieved && retrieved.length) {
+      const src = document.createElement("div");
+      src.className = "sources";
+      src.textContent = "근거: " + retrieved.map(h => h.entry_id).join(", ");
+      div.appendChild(src);
+    }
+
+    const fb = document.createElement("div");
+    fb.className = "feedback";
+    const up = document.createElement("button");
+    up.textContent = "👍";
+    const down = document.createElement("button");
+    down.textContent = "👎";
+    [[up, "up"], [down, "down"]].forEach(([btn, thumb]) => {
+      btn.onclick = () => {
+        fetch("/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conv_id: convId, turn_id: turn, thumb }),
+        });
+        btn.style.opacity = "1";
+      };
+    });
+    fb.appendChild(up);
+    fb.appendChild(down);
+    div.appendChild(fb);
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+
+    addMessage("user", message);
+    const turn = turnId++;
+
+    const resp = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conv_id: convId, turn_id: turn, message }),
+    });
+    const data = await resp.json();
+    addBotMessage(data.answer, data.retrieved, turn);
+  });
+</script>
+</body>
+</html>

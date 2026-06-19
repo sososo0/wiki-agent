@@ -34,6 +34,10 @@ eval/
   baseline.json         기준 점수(명시적 --save-baseline 없이는 보존)
 serving/
   mcp_server.py        MCP stdio 서버 (search_wiki, submit_feedback만 노출)
+demo/
+  app.py                공개 데모 채팅 백엔드(FastAPI). search_wiki로 검색 후
+                         그 결과만 근거로 답변하는 고정 RAG 파이프라인
+  static/index.html     빌드 단계 없는 채팅 UI(순수 HTML+JS)
 scripts/
   run_update_cycle.py  피드백 파이프라인 1사이클 오케스트레이션
 tests/                 pytest (기본 오프라인/무료, 느린 통합 테스트는 RUN_SLOW_TESTS=1로 가드)
@@ -58,6 +62,8 @@ cp .env.example .env   # ANTHROPIC_API_KEY 채우기
 | 검색 품질 평가 | `python eval/run_eval.py [--k 5] [--save-baseline]` |
 | MCP 서버(stdio) | `python serving/mcp_server.py` |
 | 피드백 파이프라인 1사이클 | `python scripts/run_update_cycle.py [--gold path] [--k 5]` |
+| 데모 웹앱(채팅) | `WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload` → http://localhost:8000 |
+| 데모 Docker 빌드/실행 | `docker build -t wiki-agent-demo .` 후 `docker run -p 8000:8000 -e WIKI_AGENT_DB=/data/wiki_agent.db -e ANTHROPIC_API_KEY=... -v $(pwd)/data:/data wiki-agent-demo` |
 
 ## HARD CONSTRAINTS
 
@@ -92,9 +98,20 @@ cp .env.example .env   # ANTHROPIC_API_KEY 채우기
   통과한 것만 `shadow` 상태로 반영한다. 평가 회귀가 없을 때만 `active`로 승격하고,
   회귀가 있으면 아무 것도 커밋하지 않는다. `python scripts/run_update_cycle.py` 한 번
   실행으로 이 전체 흐름이 동작하는 것을 확인했다. (`core/pipeline/`)
+- **데모 웹앱** — MCP 외에 사람이 직접 써볼 수 있는 진입점. FastAPI 백엔드가
+  `search_wiki`로 먼저 검색하고 그 결과만 근거로 답변하는 고정 RAG 채팅
+  엔드포인트(`/chat`)와 피드백 엔드포인트(`/feedback`)를 제공하고, 빌드 단계
+  없는 정적 채팅 UI 한 장을 서빙한다. `Dockerfile`로 컨테이너 빌드/실행 가능.
+  세션 상태는 서버에 두지 않고 클라이언트가 `conv_id`/`turn_id`를 들고 다닌다
+  (아직 단일 SQLite 파일 기반이라 멀티유저용은 아니다). (`demo/`, `Dockerfile`)
 
 **아직 안 한 것**
 
+- **멀티유저화** — 데모는 지금 단일 프로세스·단일 SQLite 파일로 동작한다.
+  Postgres 전환, rate limiting, 시크릿 분리(vault 등)는 아직 없다.
+- **공개 환경에서의 안전한 자가 갱신** — 자가 갱신 파이프라인 자체는 동작하지만,
+  공개 데모에 그대로 연결하면 누구나 위키를 흔들 수 있다. shadow로 쌓아두고
+  사람이 승인해야 active로 가는 워크플로는 아직 없다.
 - **사이클 자동 트리거** — 지금은 `run_update_cycle.py`를 수동으로 1회 실행하는
   것까지만 구현했다. Hermes cron 등으로 주기적으로 자동 실행하는 오케스트레이션은
   없다.

@@ -11,3 +11,8 @@ python-dotenv>=1.0
 # 재현 가능하다 — LLM-as-judge(평가 전용)와는 별개.
 sentence-transformers>=3.0
 numpy>=1.24
+
+# 데모 웹앱(demo/app.py): FastAPI 채팅 엔드포인트. httpx는 TestClient 의존성.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
