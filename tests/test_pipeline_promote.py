@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import numpy as np
+import pytest
 
 from core import wiki_store
 from core.pipeline import promote
@@ -123,3 +124,63 @@ def test_promote_if_better_commits_when_no_regression(tmp_path, monkeypatch):
 
     remaining_shadow_ids = {e["entry_id"] for e in wiki_store.list_shadow_entries()}
     assert remaining_shadow_ids == set()  # candidate/new 모두 active 또는 deprecated로 빠짐
+
+
+def test_evaluate_gap_recall_computes_per_entry_ratio_and_excludes_query_less_sources():
+    shadow_rows = [
+        {
+            "entry_id": "wiki_gap_a", "supersedes": None,
+            "sources": [
+                {"type": "retrieval_log_query", "query": "q1", "verified": False},
+                {"type": "retrieval_log_query", "query": "q2", "verified": False},
+            ],
+        },
+        {
+            "entry_id": "wiki_gap_b", "supersedes": None,
+            "sources": [{"type": "doc", "verified": True}],  # query 없음 -> 집계 제외
+        },
+    ]
+
+    def _retriever(query, k=5):
+        if query == "q1":
+            return [{"entry_id": "wiki_gap_a"}]
+        return [{"entry_id": "something_else"}]
+
+    result = promote.evaluate_gap_recall(shadow_rows, _retriever, k=5)
+
+    assert len(result["per_entry"]) == 1  # wiki_gap_b는 query 없어 제외
+    assert result["per_entry"][0]["entry_id"] == "wiki_gap_a"
+    assert result["per_entry"][0]["gap_recall"] == pytest.approx(0.5)  # q1만 hit
+    assert result["mean_gap_recall"] == pytest.approx(0.5)
+
+
+def test_evaluate_gap_recall_defaults_to_1_when_no_query_sources():
+    shadow_rows = [{"entry_id": "x", "sources": [{"type": "doc", "verified": True}]}]
+    result = promote.evaluate_gap_recall(shadow_rows, lambda q, k=5: [], k=5)
+    assert result["mean_gap_recall"] == 1.0
+    assert result["per_entry"] == []
+
+
+def test_promote_if_better_blocks_on_low_gap_recall_even_if_gold_improves(tmp_path, monkeypatch):
+    _setup_db(tmp_path, monkeypatch)
+    wiki_store.add_entry(
+        "wiki_gap_test_3", "New topic", "New canonical.", "body",
+        status="shadow", provenance="curated_from_logs",
+        sources=[{"type": "retrieval_log_query", "query": "some unanswered question", "verified": False}],
+    )
+    evaluate_fn = _stub_evaluate_factory(
+        base_scores={"recall@k": 0.5, "mrr": 0.4, "correctness": 0.3},
+        candidate_scores={"recall@k": 0.9, "mrr": 0.8, "correctness": 0.7},  # 골드셋은 개선
+    )
+    # 새 엔트리가 자신을 만든 질문으로는 절대 검색되지 않게 고정(실제 임베딩 모델 회피)
+    monkeypatch.setattr(
+        promote, "simulate_candidate_retriever",
+        lambda **kwargs: (lambda query, k=5: [{"entry_id": "something_else"}]),
+    )
+
+    result = promote.promote_if_better([{"q": "x"}], k=5, evaluate_fn=evaluate_fn)
+
+    assert result["promoted"] is False
+    assert result["gap_recall"]["mean_gap_recall"] == 0.0
+    shadow_ids = {e["entry_id"] for e in wiki_store.list_shadow_entries()}
+    assert "wiki_gap_test_3" in shadow_ids  # 커밋되지 않고 그대로 shadow 유지

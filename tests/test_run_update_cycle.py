@@ -48,9 +48,11 @@ def _stub_llm_fn(query_examples):
             "body_md": "Email support@example.com."}
 
 
-def _stub_judge_fn(patch):
+def _stub_judge_fn(patch, existing_entries):
     """password 관련 patch만 그라운딩 통과시키고, 나머지는 낮은 점수로 차단."""
-    return 1.0 if "password" in patch["topic"].lower() else 0.1
+    if "password" in patch["topic"].lower():
+        return 1.0, "ok"
+    return 0.1, "hallucination risk: unverifiable claim"
 
 
 def _stub_evaluate_fn(retriever, gold, k=5):
@@ -81,7 +83,7 @@ def test_run_cycle_creates_shadow_for_good_patch_and_blocks_bad_patch(tmp_path, 
     assert len(password_shadow_ids) == 1, f"expected one password-related shadow entry, got {shadow_ids}"
 
     rejected_reasons = {r.get("reason") for r in result["rejected"]}
-    assert "failed grounding/contradiction check" in rejected_reasons
+    assert any(r.startswith("failed grounding/contradiction check") for r in rejected_reasons)
     assert not any("account" in eid or "delet" in eid for eid in shadow_ids), \
         f"bad (account deletion) patch should never have been written as shadow: {shadow_ids}"
 

@@ -26,6 +26,7 @@ core/
     ├── mine.py          "gap"(빈도↑ + 검색 신뢰도↓) 탐지
     ├── curate.py        gap → 위키 엔트리 patch 초안(LLM, provenance=curated_from_logs)
     ├── gate.py          오염 게이트: provenance/일일상한/출처다양성/중복/grounding 5단계
+    │                    (grounding은 자기모순·기존 검증 엔트리와의 모순·환각을 직접 판정)
     ├── reindex.py       재색인 지점(현재는 영속 임베딩 캐시가 없어 no-op)
     └── promote.py       shadow 후보를 시뮬레이션 평가 후 회귀 없을 때만 active 승격
 eval/
@@ -259,15 +260,22 @@ docker run -d --name wiki-agent-demo \
 - **데이터/서빙 레이어** — SQLite+FTS5 지식 저장소, MCP 서버(`search_wiki`/`submit_feedback`),
   검색·대화·피드백 로깅까지 동작. (`core/wiki_store.py`, `serving/mcp_server.py`)
 - **평가 하니스** — 골드셋 20문항 기준 recall@k/mrr/correctness를 계산하고, 기존
-  `eval/baseline.json`과 before/after로 비교. 모든 변경은 이 숫자로 검증. (`eval/`)
+  `eval/baseline.json`과 before/after로 비교. 모든 변경은 이 숫자로 검증. 골드셋에
+  KB가 답을 모르는 unanswerable 문항 5개도 포함해, "모를 때 모른다고 하는가"를
+  escalation_correctness로 별도 측정. (`eval/`)
 - **하이브리드 검색** — 기존 BM25 키워드 검색에 dense 임베딩 + RRF 융합 +
   cross-encoder rerank를 추가. 골드셋 기준 mrr 0.935→0.975, correctness 0.35→0.40으로
   개선(recall@5는 이미 1.0으로 천장). (`core/retrieval.py`)
 - **피드백 파이프라인(1사이클)** — `retrieval_log`/`feedback` 로그에서 검색이
   약한 주제를 찾아(mine) LLM으로 위키 엔트리 초안을 만들고(curate), 오염 게이트를
-  통과한 것만 `shadow` 상태로 반영. 평가 회귀가 없을 때만 `active`로 승격,
-  회귀가 있으면 아무 것도 커밋 안 함. `python scripts/run_update_cycle.py` 한 번
-  실행으로 이 전체 흐름 동작 확인. (`core/pipeline/`)
+  통과한 것만 `shadow` 상태로 반영. 게이트의 grounding 체크는 자기모순/기존
+  검증된(active) 엔트리와의 모순/환각을 직접 binary로 판정. 평가 회귀가 없을
+  때만 `active`로 승격, 회귀가 있으면 아무 것도 커밋 안 함. 승격 직전에는 골드셋
+  회귀 체크와 별개로 각 신규 엔트리가 자신을 만든 계기였던 source 질문들로 실제
+  검색되는지(gap_recall)도 확인해, 고정 골드셋이 모르는 새 gap 주제가 진짜로
+  메워졌는지까지 검증.
+  `python scripts/run_update_cycle.py` 한 번 실행으로 이 전체 흐름 동작 확인.
+  (`core/pipeline/`)
 - **데모 웹앱** — MCP 외에 사람이 직접 써볼 수 있는 진입점. FastAPI 백엔드가
   `search_wiki`로 먼저 검색하고 그 결과만 근거로 답변하는 고정 RAG 채팅
   엔드포인트(`/chat`)와 피드백 엔드포인트(`/feedback`)를 제공하고, 빌드 단계

@@ -5,6 +5,10 @@ wiki-agent / eval / run_eval.py
 recall@k, mrr, correctness(LLM-as-judge)를 계산한다.
 이 함수가 모든 사이클·shadow/active 비교의 단일 기준점이다.
 
+골드셋에 "unanswerable": true로 표시된 문항(KB가 답을 모르는 질문)이 있으면
+escalation_correctness도 함께 계산한다 — "모를 때 모른다고 하는가"를 별도
+차원으로 측정(answerable 문항의 recall@k/mrr/correctness 계산에는 영향 없음).
+
 실행: python eval/run_eval.py
 """
 
@@ -87,10 +91,39 @@ def judge_answer(answer, ex, model=JUDGE_MODEL):
     return 1 if text.strip().lower().startswith("yes") else 0
 
 
-def evaluate(retriever, gold, k=5, gen_fn=generate, judge_fn=judge_answer):
-    """recall@k / mrr / correctness. 모든 사이클·shadow/active 비교의 단일 기준점."""
+def judge_escalation(answer, ex, model=JUDGE_MODEL):
+    """LLM-as-judge: KB가 답을 모르는 질문에 모델이 모른다고 적절히 인정했는가,
+    아니면 구체적이지만 근거 없는 답을 지어냈는가(yes=올바르게 모른다고 함)."""
+    prompt = (
+        "You are grading whether an AI correctly declined to answer because "
+        "its knowledge base had no relevant information, instead of "
+        "fabricating a specific-sounding answer.\n\n"
+        f"Question: {ex['q']}\n"
+        f"Candidate answer: {answer}\n\n"
+        "Does the candidate answer correctly admit it doesn't know / doesn't "
+        "have the information, rather than inventing a confident specific "
+        "answer? Reply with exactly one word: \"yes\" or \"no\"."
+    )
+    resp = _anthropic_client().messages.create(
+        model=model,
+        max_tokens=5,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    return 1 if text.strip().lower().startswith("yes") else 0
+
+
+def evaluate(
+    retriever, gold, k=5, gen_fn=generate, judge_fn=judge_answer,
+    escalation_judge_fn=judge_escalation,
+):
+    """recall@k / mrr / correctness(answerable 문항만) + escalation_correctness
+    (unanswerable 문항만, 있을 때만). 모든 사이클·shadow/active 비교의 단일 기준점."""
+    answerable = [ex for ex in gold if not ex.get("unanswerable")]
+    unanswerable = [ex for ex in gold if ex.get("unanswerable")]
+
     recall, mrr, correct = 0, 0, 0
-    for ex in gold:
+    for ex in answerable:
         hits = retriever(ex["q"], k)
         ids = [h["entry_id"] for h in hits]
         if set(ex["gold_entry_ids"]) & set(ids):
@@ -100,8 +133,17 @@ def evaluate(retriever, gold, k=5, gen_fn=generate, judge_fn=judge_answer):
                 mrr += 1 / rank
                 break
         correct += judge_fn(gen_fn(ex["q"], hits), ex)
-    n = len(gold)
-    return {"recall@k": recall / n, "mrr": mrr / n, "correctness": correct / n}
+    n = len(answerable)
+    result = {"recall@k": recall / n, "mrr": mrr / n, "correctness": correct / n}
+
+    if unanswerable:
+        escalation_correct = sum(
+            escalation_judge_fn(gen_fn(ex["q"], retriever(ex["q"], k)), ex)
+            for ex in unanswerable
+        )
+        result["escalation_correctness"] = escalation_correct / len(unanswerable)
+
+    return result
 
 
 def main():
@@ -138,8 +180,14 @@ def main():
             print(f"  {name:12s} {val:.3f}")
 
     if before is None or args.save_baseline:
+        n_unanswerable = sum(1 for ex in gold if ex.get("unanswerable"))
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({"k": args.k, "n": len(gold), **scores}, f, indent=2, ensure_ascii=False)
+            json.dump({
+                "k": args.k, "n": len(gold),
+                "n_answerable": len(gold) - n_unanswerable,
+                "n_unanswerable": n_unanswerable,
+                **scores,
+            }, f, indent=2, ensure_ascii=False)
         print(f"\nbaseline saved -> {out_path}")
     else:
         print(f"\nbaseline preserved (use --save-baseline to overwrite) -> {out_path}")

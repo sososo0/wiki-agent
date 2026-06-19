@@ -62,14 +62,53 @@ def test_evaluate_correctness_uses_judge_fn():
 
 def test_gold_set_schema():
     gold = load_gold(GOLD_PATH)
-    assert len(gold) == 20
-    for ex in gold:
+    assert len(gold) == 25
+    answerable = [ex for ex in gold if not ex.get("unanswerable")]
+    unanswerable = [ex for ex in gold if ex.get("unanswerable")]
+    assert len(answerable) == 20
+    assert len(unanswerable) == 5
+
+    for ex in answerable:
         assert set(ex) >= {"q", "gold_entry_ids", "must_contain", "gold_answer"}
         assert isinstance(ex["q"], str) and ex["q"]
         assert isinstance(ex["gold_entry_ids"], list) and ex["gold_entry_ids"]
         assert set(ex["gold_entry_ids"]) <= SEED_IDS
         assert isinstance(ex["must_contain"], list) and ex["must_contain"]
         assert isinstance(ex["gold_answer"], str) and ex["gold_answer"]
+
+    for ex in unanswerable:
+        assert isinstance(ex["q"], str) and ex["q"]
+        assert ex["gold_entry_ids"] == []  # KB가 답을 모르는 문항임을 직접 표시
+
+
+def test_evaluate_computes_escalation_correctness_for_unanswerable_only():
+    gold = [
+        {"q": "q1", "gold_entry_ids": ["a"], "must_contain": [], "gold_answer": ""},
+        {"q": "q2", "gold_entry_ids": [], "must_contain": [], "gold_answer": None, "unanswerable": True},
+        {"q": "q3", "gold_entry_ids": [], "must_contain": [], "gold_answer": None, "unanswerable": True},
+    ]
+    retriever = fake_retriever({"q1": ["a"]})
+    scores = evaluate(
+        retriever, gold, k=5,
+        gen_fn=lambda q, hits: "stub answer",
+        judge_fn=lambda answer, ex: 1,
+        escalation_judge_fn=lambda answer, ex: 1 if ex["q"] == "q2" else 0,
+    )
+    # answerable 1문항만으로 계산 -> unanswerable이 분모를 오염시키지 않음
+    assert scores["recall@k"] == pytest.approx(1.0)
+    assert scores["correctness"] == pytest.approx(1.0)
+    assert scores["escalation_correctness"] == pytest.approx(0.5)  # q2만 맞음
+
+
+def test_evaluate_omits_escalation_key_when_no_unanswerable_items():
+    gold = [{"q": "q1", "gold_entry_ids": ["a"], "must_contain": [], "gold_answer": ""}]
+    retriever = fake_retriever({"q1": ["a"]})
+    scores = evaluate(
+        retriever, gold, k=5,
+        gen_fn=lambda q, hits: "stub",
+        judge_fn=lambda answer, ex: 1,
+    )
+    assert "escalation_correctness" not in scores
 
 
 @pytest.mark.skipif(
