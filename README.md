@@ -78,6 +78,26 @@ cp .env.example .env   # ANTHROPIC_API_KEY 채우기
 
 ## 현재 상태
 
-- ✅ Step 2 — 평가 하니스 (`eval/`)
-- ✅ Step 3 — 하이브리드 검색 (BM25 + dense + RRF + rerank, `core/retrieval.py`)
-- ✅ Step 6 — 피드백 파이프라인 (`core/pipeline/`, `scripts/run_update_cycle.py`)
+**완료**
+
+- **데이터/서빙 레이어** — SQLite+FTS5 지식 저장소, MCP 서버(`search_wiki`/`submit_feedback`),
+  검색·대화·피드백 로깅까지 동작. (`core/wiki_store.py`, `serving/mcp_server.py`)
+- **평가 하니스** — 골드셋 20문항 기준 recall@k/mrr/correctness를 계산하고, 기존
+  `eval/baseline.json`과 before/after로 비교한다. 모든 변경은 이 숫자로 검증한다. (`eval/`)
+- **하이브리드 검색** — 기존 BM25 키워드 검색에 dense 임베딩 + RRF 융합 +
+  cross-encoder rerank를 추가. 골드셋 기준 mrr 0.935→0.975, correctness 0.35→0.40으로
+  개선(recall@5는 이미 1.0으로 천장). (`core/retrieval.py`)
+- **피드백 파이프라인(1사이클)** — `retrieval_log`/`feedback` 로그에서 검색이
+  약한 주제를 찾아(mine) LLM으로 위키 엔트리 초안을 만들고(curate), 오염 게이트를
+  통과한 것만 `shadow` 상태로 반영한다. 평가 회귀가 없을 때만 `active`로 승격하고,
+  회귀가 있으면 아무 것도 커밋하지 않는다. `python scripts/run_update_cycle.py` 한 번
+  실행으로 이 전체 흐름이 동작하는 것을 확인했다. (`core/pipeline/`)
+
+**아직 안 한 것**
+
+- **사이클 자동 트리거** — 지금은 `run_update_cycle.py`를 수동으로 1회 실행하는
+  것까지만 구현했다. Hermes cron 등으로 주기적으로 자동 실행하는 오케스트레이션은
+  없다.
+- **여러 사이클에 걸친 효과 증명** — 1회 실행이 동작하는 것만 확인했고, 위키가
+  실제로 시간이 지나며 좋아지는지(사이클별 eval 점수 추이, 승격/거부 통계 누적)를
+  보여주는 대시보드나 기록은 아직 없다.
