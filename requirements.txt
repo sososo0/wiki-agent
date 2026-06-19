@@ -1,0 +1,13 @@
+# MCP 서버 실행용. core/wiki_store.py 자체는 표준 라이브러리만 사용한다.
+mcp>=1.2
+
+# 평가 하니스(eval/run_eval.py): generate + LLM-as-judge 호출
+anthropic>=0.40
+pytest>=8.0
+python-dotenv>=1.0
+
+# 검색 모듈(core/retrieval.py): dense 임베딩 + cross-encoder rerank를 로컬에서 계산.
+# 외부 임베딩 API 비용/네트워크 의존 없이 검색 경로(MCP 서빙 포함)가 동작해야
+# 재현 가능하다 — LLM-as-judge(평가 전용)와는 별개.
+sentence-transformers>=3.0
+numpy>=1.24
