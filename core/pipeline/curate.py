@@ -94,3 +94,116 @@ def curate(
             f"< threshold"
         ),
     }
+
+
+def default_doc_llm_fn(heading_path, text, model=CURATE_MODEL) -> Dict[str, str]:
+    """실제 Anthropic 호출로 문서 청크 -> {"topic", "canonical", "body_md"} JSON.
+
+    질문에서 답을 추론하는 default_llm_fn과 달리, 이미 쓰여진 본문을 요약/정제만
+    한다(출처가 사람이 작성한 문서 자체이므로 새 사실을 지어내지 않도록 지시)."""
+    heading = " > ".join(heading_path) if heading_path else "(no heading)"
+    prompt = (
+        "You are curating a wiki entry from an existing verified document. "
+        "Summarize and restructure the section below WITHOUT adding any fact "
+        "not present in it. Keep body_md under 80 words, plain prose, no "
+        "markdown code fences inside it. Reply with JSON only, no other text: "
+        '{"topic": "...", "canonical": "one sentence summary", "body_md": "..."}\n\n'
+        f"Section heading: {heading}\n\nSection text:\n{text}"
+    )
+    resp = _anthropic_client().messages.create(
+        model=model,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text_out = next((b.text for b in resp.content if b.type == "text"), "")
+    return json.loads(_extract_json_object(text_out))
+
+
+def doc_chunk_entry_id(candidate: Dict[str, Any]) -> str:
+    """candidate(doc_path + chunk_index) -> 결정적 entry_id. LLM 호출과 무관하게
+    계산 가능 — dedupe.py가 curate_doc_chunk()를 호출(=LLM 비용 발생)하기 전에
+    이미 같은 entry_id가 존재하는지 먼저 확인할 수 있어야 하므로 별도 공개 함수로
+    분리한다(같은 파일의 같은 섹션 위치는 항상 같은 entry_id)."""
+    heading_slug = _slugify(" ".join(candidate["heading_path"]) or candidate["doc_path"])
+    digest = hashlib.sha1(
+        f"{candidate['doc_path']}::{candidate['chunk_index']}".encode("utf-8")
+    ).hexdigest()[:8]
+    return f"wiki_doc_{heading_slug}_{digest}"
+
+
+def curate_doc_chunk(
+    candidate: Dict[str, Any],
+    *,
+    llm_fn: Optional[Callable] = None,
+    model: str = CURATE_MODEL,
+) -> Dict[str, Any]:
+    """문서 청크 candidate(chunk.to_doc_candidates 출력) -> patch dict.
+
+    curate()와 출력 모양(op/entry_id/topic/canonical/body_md/provenance/
+    confidence/sources/reason)은 동일하지만, provenance="doc_verified"(사람이
+    작성한 실재 문서 본문이 출처이므로 curated_from_logs보다 신뢰도가 높음)이고
+    sources는 단일 문서 출처 1건이다(질문 다건이 아니므로 query 필드가 없음).
+    llm_fn(heading_path, text) -> {topic, canonical, body_md} 형태로 주입 가능."""
+    llm_fn = llm_fn or (lambda hp, t: default_doc_llm_fn(hp, t, model=model))
+    drafted = llm_fn(candidate["heading_path"], candidate["text"])
+
+    entry_id = doc_chunk_entry_id(candidate)
+
+    return {
+        "op": "create",
+        "entry_id": entry_id,
+        "topic": drafted["topic"],
+        "canonical": drafted["canonical"],
+        "body_md": drafted.get("body_md", ""),
+        "provenance": "doc_verified",
+        "confidence": 0.9,
+        "sources": [{
+            "type": "document",
+            "path": candidate["doc_path"],
+            "heading_path": candidate["heading_path"],
+            "chunk_hash": candidate["chunk_hash"],
+            "verified": True,
+        }],
+        "reason": f"doc_path={candidate['doc_path']} chunk_index={candidate['chunk_index']}",
+    }
+
+
+def default_doc_judge_fn(patch: Dict[str, Any], chunk_text: str, model: str = CURATE_MODEL) -> float:
+    """gate.default_judge_fn과 동일한 0~1 grounding 점수를 매기지만, 그쪽은
+    `s.get('query', s)`로 source를 텍스트화해서 문서 출처(query 필드 없음)에서는
+    source dict를 그대로 stringify해 judge에 넘기는 문제가 있다(실제 청크 본문을
+    한 번도 보지 못함) — gate.py는 무수정 대상이라, 여기서 원본 chunk_text를
+    직접 프롬프트에 넣는 문서 전용 judge를 만들어 ingest_doc.py가 주입한다."""
+    prompt = (
+        "You are reviewing a candidate knowledge-base entry before it is "
+        "merged. Judge whether the entry content is grounded in the source "
+        "document text below (no fabricated facts, no internal "
+        "contradiction). Reply with a single number between 0 and 1 "
+        "(1 = fully grounded, 0 = fabricated/contradictory), nothing else.\n\n"
+        f"Entry topic: {patch.get('topic')}\n"
+        f"Entry canonical: {patch.get('canonical')}\n"
+        f"Entry body: {patch.get('body_md')}\n\n"
+        f"Source document text:\n{chunk_text}"
+    )
+    resp = _anthropic_client().messages.create(
+        model=model,
+        max_tokens=5,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = next((b.text for b in resp.content if b.type == "text"), "0")
+    match = re.search(r"[01](?:\.\d+)?", text)
+    return float(match.group()) if match else 0.0
+
+
+def make_doc_judge_fn(
+    chunk_text_by_entry_id: Dict[str, str],
+    *,
+    model: str = CURATE_MODEL,
+) -> Callable[[Dict[str, Any]], float]:
+    """entry_id -> 원본 chunk 텍스트 매핑(클로저로 참조, ingest_doc.py가 candidate를
+    돌면서 채움)을 들고 있는 judge_fn을 만들어 반환. gate.passes_gate(judge_fn=...)에
+    그대로 주입 가능."""
+    def _judge(patch: Dict[str, Any]) -> float:
+        chunk_text = chunk_text_by_entry_id.get(patch.get("entry_id"), "")
+        return default_doc_judge_fn(patch, chunk_text, model=model)
+    return _judge
