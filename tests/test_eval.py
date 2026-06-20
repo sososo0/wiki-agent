@@ -1,8 +1,9 @@
 """
 wiki-agent / tests / test_eval.py
 
-평가 하니스 검증. generate/judge_answer(LLM 호출)은 스텁으로 대체해
-네트워크 비용 없이 recall@k/mrr 계산 로직과 골드셋 스키마를 검증한다.
+평가 하니스 검증. generate/judge_answer/judge_quality(LLM 호출)는 스텁으로 대체해
+네트워크 비용 없이 recall@k/mrr 계산 로직, 골드셋 스키마, qualitative=True 옵트인
+확장(기존 키 불변 + groundedness/completeness/relevance 평균/리포트)을 검증한다.
 
 실행: pytest
 """
@@ -109,6 +110,48 @@ def test_evaluate_omits_escalation_key_when_no_unanswerable_items():
         judge_fn=lambda answer, ex: 1,
     )
     assert "escalation_correctness" not in scores
+
+
+def test_evaluate_qualitative_false_by_default_omits_new_keys():
+    """qualitative 인자를 안 주면(기본 False) 반환 키가 기존과 100% 동일해야 한다 —
+    promote.py의 "recall@k"/"correctness" 회귀 판정 경로가 이 계약에 의존한다."""
+    gold = [{"q": "q1", "gold_entry_ids": ["a"], "must_contain": [], "gold_answer": ""}]
+    retriever = fake_retriever({"q1": ["a"]})
+    scores = evaluate(
+        retriever, gold, k=5,
+        gen_fn=lambda q, hits: "stub",
+        judge_fn=lambda answer, ex: 1,
+    )
+    assert set(scores) == {"recall@k", "mrr", "correctness"}
+
+
+def test_evaluate_qualitative_true_adds_rubric_averages_and_report():
+    gold = [
+        {"q": "q1", "gold_entry_ids": ["a"], "must_contain": [], "gold_answer": ""},
+        {"q": "q2", "gold_entry_ids": ["b"], "must_contain": [], "gold_answer": ""},
+    ]
+    retriever = fake_retriever({"q1": ["a"], "q2": ["b"]})
+    stub_quality = {
+        "q1": {"groundedness": 4, "completeness": 5, "relevance": 3, "rationale": "r1"},
+        "q2": {"groundedness": 2, "completeness": 3, "relevance": 5, "rationale": "r2"},
+    }
+    scores = evaluate(
+        retriever, gold, k=5,
+        gen_fn=lambda q, hits: f"answer for {q}",
+        judge_fn=lambda answer, ex: 1,
+        qualitative=True,
+        quality_judge_fn=lambda answer, ex: stub_quality[ex["q"]],
+    )
+    # 기존 키는 그대로 보존
+    assert scores["recall@k"] == pytest.approx(1.0)
+    assert scores["correctness"] == pytest.approx(1.0)
+    # 새 키는 옵트인으로만 추가
+    assert scores["groundedness"] == pytest.approx((4 + 2) / 2)
+    assert scores["completeness"] == pytest.approx((5 + 3) / 2)
+    assert scores["relevance"] == pytest.approx((3 + 5) / 2)
+    assert len(scores["qualitative_report"]) == 2
+    assert scores["qualitative_report"][0]["q"] == "q1"
+    assert scores["qualitative_report"][0]["rationale"] == "r1"
 
 
 @pytest.mark.skipif(
