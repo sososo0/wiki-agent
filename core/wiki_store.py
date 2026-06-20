@@ -145,13 +145,20 @@ def _fts_query(q: str) -> str:
 
 
 def list_active_entries() -> List[Dict[str, Any]]:
-    """status='active' 엔트리 전체를 반환 (하이브리드 검색의 dense 랭킹 입력)."""
+    """status='active' 엔트리 전체를 반환 (하이브리드 검색의 dense 랭킹 입력).
+
+    sources도 포함한다 — 문서 ingestion의 dedupe(core/pipeline/dedupe.py)가
+    이미 active로 승격된 엔트리의 chunk_hash를 비교해 콘텐츠 변경 여부를
+    판단해야 하기 때문(검색 경로 자체는 sources를 쓰지 않으므로 영향 없음)."""
     conn = _conn()
     rows = conn.execute(
-        """SELECT entry_id, topic, canonical, body_md, confidence, version
+        """SELECT entry_id, topic, canonical, body_md, confidence, version, sources
            FROM wiki_entry WHERE status = 'active'""").fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [
+        {**dict(r), "sources": json.loads(r["sources"]) if r["sources"] else []}
+        for r in rows
+    ]
 
 
 def _bm25_rank(query: str, limit: int) -> List[str]:
