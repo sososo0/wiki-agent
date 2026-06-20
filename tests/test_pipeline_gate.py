@@ -35,12 +35,12 @@ EXISTING_ENTRIES = [
 ]
 
 
-def _stub_judge_high(patch):
-    return 1.0
+def _stub_judge_high(patch, existing_entries):
+    return 1.0, "ok"
 
 
-def _stub_judge_low(patch):
-    return 0.1
+def _stub_judge_low(patch, existing_entries):
+    return 0.1, "hallucination risk: fabricated benchmark numbers"
 
 
 def test_good_patch_passes():
@@ -106,4 +106,59 @@ def test_failed_grounding_check_is_blocked():
         GOOD_PATCH, today_writes=0, existing_entries=EXISTING_ENTRIES,
         judge_fn=_stub_judge_low,
     )
-    assert (ok, reason) == (False, "failed grounding/contradiction check")
+    assert ok is False
+    assert reason.startswith("failed grounding/contradiction check")
+    assert "hallucination risk" in reason
+
+
+def test_default_judge_fn_flags_contradiction_with_existing_entry(monkeypatch):
+    """default_judge_fn의 JSON 파싱/스코어링 로직을 가짜 응답으로 검증(API 호출 없음)."""
+
+    class _FakeTextBlock:
+        type = "text"
+        text = (
+            '{"self_contradictory": false, "contradicts_existing": true, '
+            '"contradicting_entry_id": "wiki_0001", "hallucination_risk": false, '
+            '"explanation": "recommends fixed delay, existing entry requires backoff with jitter"}'
+        )
+
+    class _FakeResponse:
+        content = [_FakeTextBlock()]
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return _FakeResponse()
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(gate, "_anthropic_client", lambda: _FakeClient())
+
+    score, reason = gate.default_judge_fn(GOOD_PATCH, EXISTING_ENTRIES)
+    assert score == 0.0
+    assert "wiki_0001" in reason
+
+
+def test_default_judge_fn_passes_when_no_issues_flagged(monkeypatch):
+    class _FakeTextBlock:
+        type = "text"
+        text = (
+            '{"self_contradictory": false, "contradicts_existing": false, '
+            '"contradicting_entry_id": null, "hallucination_risk": false, '
+            '"explanation": "consistent and unremarkable"}'
+        )
+
+    class _FakeResponse:
+        content = [_FakeTextBlock()]
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return _FakeResponse()
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(gate, "_anthropic_client", lambda: _FakeClient())
+
+    score, reason = gate.default_judge_fn(GOOD_PATCH, EXISTING_ENTRIES)
+    assert score == 1.0

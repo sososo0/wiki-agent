@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 CURATE_MODEL = os.environ.get("WIKI_AGENT_CURATE_MODEL", "claude-haiku-4-5")
 
@@ -168,12 +168,16 @@ def curate_doc_chunk(
     }
 
 
-def default_doc_judge_fn(patch: Dict[str, Any], chunk_text: str, model: str = CURATE_MODEL) -> float:
-    """gate.default_judge_fn과 동일한 0~1 grounding 점수를 매기지만, 그쪽은
-    `s.get('query', s)`로 source를 텍스트화해서 문서 출처(query 필드 없음)에서는
+def default_doc_judge_fn(
+    patch: Dict[str, Any], chunk_text: str, model: str = CURATE_MODEL,
+) -> Tuple[float, str]:
+    """gate.default_judge_fn과 동일한 (score, reason) 0~1 grounding 계약을 따르지만,
+    그쪽은 `s.get('query', s)`로 source를 텍스트화해서 문서 출처(query 필드 없음)에서는
     source dict를 그대로 stringify해 judge에 넘기는 문제가 있다(실제 청크 본문을
     한 번도 보지 못함) — gate.py는 무수정 대상이라, 여기서 원본 chunk_text를
-    직접 프롬프트에 넣는 문서 전용 judge를 만들어 ingest_doc.py가 주입한다."""
+    직접 프롬프트에 넣는 문서 전용 judge를 만들어 ingest_doc.py가 주입한다.
+    gate.passes_gate가 `score, reason = judge_fn(patch, existing_entries)`로
+    호출하므로 반환 타입을 그 계약과 동일하게 맞춘다."""
     prompt = (
         "You are reviewing a candidate knowledge-base entry before it is "
         "merged. Judge whether the entry content is grounded in the source "
@@ -192,18 +196,21 @@ def default_doc_judge_fn(patch: Dict[str, Any], chunk_text: str, model: str = CU
     )
     text = next((b.text for b in resp.content if b.type == "text"), "0")
     match = re.search(r"[01](?:\.\d+)?", text)
-    return float(match.group()) if match else 0.0
+    score = float(match.group()) if match else 0.0
+    return score, f"doc grounding score={score}"
 
 
 def make_doc_judge_fn(
     chunk_text_by_entry_id: Dict[str, str],
     *,
     model: str = CURATE_MODEL,
-) -> Callable[[Dict[str, Any]], float]:
+) -> Callable[[Dict[str, Any], List[Dict[str, Any]]], Tuple[float, str]]:
     """entry_id -> 원본 chunk 텍스트 매핑(클로저로 참조, ingest_doc.py가 candidate를
-    돌면서 채움)을 들고 있는 judge_fn을 만들어 반환. gate.passes_gate(judge_fn=...)에
-    그대로 주입 가능."""
-    def _judge(patch: Dict[str, Any]) -> float:
+    돌면서 채움)을 들고 있는 judge_fn을 만들어 반환. gate.passes_gate(judge_fn=...)는
+    `judge_fn(patch, existing_entries)`로 호출하고 `(score, reason)`을 기대하므로
+    그 시그니처에 맞춘다 — existing_entries는 문서 grounding 판단에 쓰지 않지만
+    (청크 본문 자체가 출처이므로) 호출 계약상 받아야 한다."""
+    def _judge(patch: Dict[str, Any], existing_entries: List[Dict[str, Any]]) -> Tuple[float, str]:
         chunk_text = chunk_text_by_entry_id.get(patch.get("entry_id"), "")
         return default_doc_judge_fn(patch, chunk_text, model=model)
     return _judge

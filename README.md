@@ -29,6 +29,7 @@ core/
     ├── curate.py        gap/문서청크 → 위키 엔트리 patch 초안(LLM, curated_from_logs/doc_verified)
     ├── dedupe.py        문서청크 entry_id 결정 + chunk_hash 비교로 skip/create/update 분기(멱등성)
     ├── gate.py          오염 게이트: provenance/일일상한/출처다양성/중복/grounding 5단계
+    │                    (grounding은 자기모순·기존 검증 엔트리와의 모순·환각을 직접 판정)
     ├── reindex.py       재색인 지점(현재는 영속 임베딩 캐시가 없어 no-op)
     └── promote.py       shadow 후보를 시뮬레이션 평가 후 회귀 없을 때만 active 승격
 eval/
@@ -176,7 +177,8 @@ shadow→eval→promote 경로를 탐).
 | 서빙 로직 검증 | `python test_client.py` |
 | 단위 테스트(오프라인, 기본) | `pytest` |
 | 느린 통합 테스트 포함(실제 모델 로딩) | `RUN_SLOW_TESTS=1 pytest` |
-| 검색 품질 평가 | `python eval/run_eval.py [--k 5] [--save-baseline]` |
+| 검색 품질 평가 | `python eval/run_eval.py [--k 5] [--save-baseline] [--qualitative]` |
+| 에이전틱 태스크 평가(진단용) | `python eval/agentic_eval.py [--max-turns 4]` |
 | MCP 서버(stdio) | `python serving/mcp_server.py` |
 | 피드백 파이프라인 1사이클 | `python scripts/run_update_cycle.py [--gold path] [--k 5]` |
 | 문서 ingestion 파이프라인 | `python scripts/ingest_doc.py <path...> [--daily-cap N] [--min-sources 1]` |
@@ -222,6 +224,51 @@ gold set: 20 questions, k=5
 
 baseline preserved (use --save-baseline to overwrite) -> eval/baseline.json
 ```
+
+기본 `correctness`는 binary(yes/no) judge라 "왜 맞다/틀리다"의 정성적 근거가 없다.
+`--qualitative`를 주면 같은 답변(재생성 없이 재사용)에 judge를 1회 더 불러
+groundedness(근거 충실도)/completeness(필수 포인트 커버리지)/relevance(질문 적합도)를
+1-5로 채점해 평균을 추가로 출력한다. `recall@k`/`correctness` 키와 계산식은 그대로라
+`core/pipeline/promote.py`의 shadow→active 회귀 판정에는 영향 없음(옵트인 전용 확장).
+
+```bash
+python eval/run_eval.py --qualitative                              # rubric 평균만 stdout에 출력
+python eval/run_eval.py --qualitative --qualitative-report out.json # 질문별 점수+rationale도 저장
+```
+
+### 에이전틱 태스크 평가(진단용)
+
+`eval/run_eval.py`의 골드셋은 "질문 1개 → 검색 1회 → 정답 엔트리 1개"만 다루지만,
+실제 서빙 에이전트(Hermes 등)는 `search_wiki`를 도구로 여러 번 호출해 서로 다른
+엔트리를 조합해야 답할 수 있는 멀티홉 질문도 받는다. `eval/agentic_eval.py`는
+`eval/agentic_gold_set.jsonl`(엔트리 2개 이상을 결합해야 풀리는 태스크)을 대상으로
+ReAct 스타일 루프(검색할지/답할지 매 턴 결정, 최대 `--max-turns`회)를 돌려 이 능력만
+별도로 측정한다.
+
+```bash
+python eval/agentic_eval.py               # max_turns=4(기본)로 멀티홉 태스크 평가
+python eval/agentic_eval.py --max-turns 6 # 검색 턴 예산을 늘려서 평가
+```
+
+예시 출력:
+
+```
+agentic gold set: 6 multi-hop tasks, max_turns=4
+  task_success_rate: 0.833
+  avg_tool_calls:    2.000
+  multihop_recall:   0.917
+
+  [OK] (2 calls) 결제 요청이 타임아웃으로 실패했는데, 그대로 재시도해도 안전한가요?...
+        gold=['wiki_0001', 'wiki_0005'] retrieved=['wiki_0001', 'wiki_0005']
+  ...
+```
+
+**한계**: 진단/리포트 전용이며 `promote.py`의 승격 게이트에는 연결하지 않는다
+(HARD CONSTRAINT: 게이트는 정확히 `"recall@k"`/`"correctness"` 키만 본다). baseline
+저장/비교도 없다 — 멀티홉 능력의 변화를 사람이 수동으로 확인하기 위한 용도. seed
+코퍼스가 5개 엔트리뿐이라 `k`가 작아도 검색 1~2회면 코퍼스 대부분이 잡혀
+`multihop_recall`이 쉽게 1.0에 가까워진다(검색 단계의 한계가 아니라 코퍼스 크기의
+한계) — 실제 신호는 `task_success_rate`(찾은 정보를 올바르게 종합했는지)에 더 있다.
 
 ### MCP 서버(stdio)
 
@@ -306,7 +353,9 @@ docker run -d --name wiki-agent-demo \
 - **데이터/서빙 레이어** — SQLite+FTS5 지식 저장소, MCP 서버(`search_wiki`/`submit_feedback`),
   검색·대화·피드백 로깅까지 동작. (`core/wiki_store.py`, `serving/mcp_server.py`)
 - **평가 하니스** — 골드셋 20문항 기준 recall@k/mrr/correctness를 계산하고, 기존
-  `eval/baseline.json`과 before/after로 비교. 모든 변경은 이 숫자로 검증. (`eval/`)
+  `eval/baseline.json`과 before/after로 비교. 모든 변경은 이 숫자로 검증. 골드셋에
+  KB가 답을 모르는 unanswerable 문항 5개도 포함해, "모를 때 모른다고 하는가"를
+  escalation_correctness로 별도 측정. (`eval/`)
 - **하이브리드 검색** — 기존 BM25 키워드 검색에 dense 임베딩 + RRF 융합 +
   cross-encoder rerank를 추가. 골드셋 기준 mrr 0.935→0.975, correctness 0.35→0.40으로
   개선(recall@5는 이미 1.0으로 천장). (`core/retrieval.py`)

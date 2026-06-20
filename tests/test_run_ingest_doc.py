@@ -45,8 +45,8 @@ def _stub_llm_fn(heading_path, text):
     }
 
 
-def _stub_judge_fn(patch):
-    return 1.0
+def _stub_judge_fn(patch, existing_entries):
+    return 1.0, "ok"
 
 
 def _stub_evaluate_fn(retriever, gold, k=5):
@@ -160,8 +160,10 @@ def test_ingest_isolates_failed_files(tmp_path, monkeypatch):
     assert len(result["shadow_written"]) == 2
 
 
-def _stub_judge_fn_rejects_rate_limiting(patch):
-    return 0.1 if "rate limiting" in patch["topic"].lower() else 1.0
+def _stub_judge_fn_rejects_rate_limiting(patch, existing_entries):
+    if "rate limiting" in patch["topic"].lower():
+        return 0.1, "rejected for test"
+    return 1.0, "ok"
 
 
 def test_ingest_does_not_recurate_unchanged_rejected_chunk(tmp_path, monkeypatch):
