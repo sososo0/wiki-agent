@@ -24,7 +24,10 @@ core/
 └── pipeline/
     ├── ingest.py        retrieval_log/feedback 정규화·집계
     ├── mine.py          "gap"(빈도↑ + 검색 신뢰도↓) 탐지
-    ├── curate.py        gap → 위키 엔트리 patch 초안(LLM, provenance=curated_from_logs)
+    ├── parse.py         마크다운 파일/디렉터리 → 헤더 기준 섹션 리스트(문서 ingestion 입력단)
+    ├── chunk.py         섹션 → max_chars 상한 청크 + to_doc_candidates()로 mine 출력과 같은 모양 변환
+    ├── curate.py        gap/문서청크 → 위키 엔트리 patch 초안(LLM, curated_from_logs/doc_verified)
+    ├── dedupe.py        문서청크 entry_id 결정 + chunk_hash 비교로 skip/create/update 분기(멱등성)
     ├── gate.py          오염 게이트: provenance/일일상한/출처다양성/중복/grounding 5단계
     │                    (grounding은 자기모순·기존 검증 엔트리와의 모순·환각을 직접 판정)
     ├── reindex.py       재색인 지점(현재는 영속 임베딩 캐시가 없어 no-op)
@@ -39,7 +42,8 @@ demo/                    MCP 외 진입점 — 사람이 직접 써보는 FastAP
 ├── app.py               search_wiki 검색 결과만 근거로 답변하는 고정 RAG 파이프라인
 └── static/index.html    빌드 단계 없는 채팅 UI(순수 HTML+JS)
 scripts/
-└── run_update_cycle.py  피드백 파이프라인 1사이클 오케스트레이션
+├── run_update_cycle.py  피드백 파이프라인 1사이클 오케스트레이션
+└── ingest_doc.py        문서 ingestion 파이프라인 오케스트레이션(parse→chunk→curate→gate→shadow→promote)
 tests/                   pytest (기본 오프라인/무료, 느린 통합 테스트는 RUN_SLOW_TESTS=1로 가드)
 docs/                    설계/구현/운영 문서(필요할 때 직접 읽을 것)
 conftest.py
@@ -133,6 +137,39 @@ docker run -d --name wiki-agent-demo \
 회귀, `correctness`만 바뀌었다면 노이즈일 가능성이 높음 — 회귀 차단 자체는
 설계대로 보수적으로 동작하는 것이라 승격 실패 ≠ 사이클 실패.
 
+## 외부 문서로 위키 채우기 (문서 ingestion 파이프라인)
+
+대화 로그 마이닝과는 별도로, 사람이 작성한 마크다운 문서를 직접 위키에 반영하는
+경로. `core/pipeline/parse.py`가 ATX 헤더(`#`~`######`) 기준으로 문서를 섹션으로
+나누고, `chunk.py`가 `max_chars`(기본 2000자) 상한으로 청크를 만든다. 각 청크는
+`dedupe.py`가 `entry_id`(파일 경로+섹션 위치로 결정적)와 `chunk_hash`(내용 기반)를
+비교해 콘텐츠가 그대로면 LLM 호출 없이 건너뛴다(skip) — 같은 문서를 몇 번 재실행해도
+변경된 섹션만 비용이 든다. 게이트가 거부한 청크도 동일하게 `chunk_hash` 기준으로
+기억해(`status="rejected"` 마커) 콘텐츠가 안 바뀌었으면 재실행 시 다시 큐레이션/judge에
+돌리지 않는다(skip_rejected) — 문서 내용이 바뀌면(`chunk_hash` 변경) 자동으로 새 주소가
+되어 다시 시도된다. 나머지는 기존 게이트/shadow/promote를 그대로 통과한다. provenance는
+`doc_verified`(사람이 쓴 문서가 출처이므로 로그 마이닝의 `curated_from_logs`보다
+신뢰도가 높음).
+
+```bash
+WIKI_AGENT_DB=/tmp/demo.db python scripts/ingest_doc.py docs/ --daily-cap 5
+```
+
+stdout에서 `parsed_files`/`skipped_chunks`/`skipped_rejected_chunks`/`llm_calls`/
+`shadow_written`/`rejected`/`promote` 확인. 같은 명령을 다시 실행하면 `skipped_chunks` +
+`skipped_rejected_chunks`가 전체 청크 수와 같고 `llm_calls: 0`, `shadow_written: []`,
+`rejected: []`이어야 함(멱등성 — 게이트 거부분도 콘텐츠가 그대로면 재시도하지 않음).
+문서 일부를 수정한 뒤
+재실행하면 바뀐 섹션만 새 shadow 후보가 생긴다 — 이미 `active`인 엔트리의 내용이
+바뀐 경우엔 같은 entry_id를 직접 덮어쓰지 않고 `{entry_id}_v{n}` + `supersedes`로
+새 shadow를 만들어 게이트를 다시 거치게 한다(HARD CONSTRAINT: active 갱신도 반드시
+shadow→eval→promote 경로를 탐).
+
+**한계(1차 구현 범위 밖)**: 문서 구조가 바뀌어 섹션이 분리/병합되면 새 entry_id가
+생기고 옛 entry_id는 자동으로 deprecated되지 않음(수동 정리 필요). `promote.py`의
+회귀 체크는 골드셋 기준 recall@k/correctness만 보므로, 문서 ingestion 자체의 게이트
+통과율 같은 별도 코퍼스 스케일링 지표는 아직 없음.
+
 ## 명령
 
 | 목적 | 명령 |
@@ -143,6 +180,7 @@ docker run -d --name wiki-agent-demo \
 | 검색 품질 평가 | `python eval/run_eval.py [--k 5] [--save-baseline]` |
 | MCP 서버(stdio) | `python serving/mcp_server.py` |
 | 피드백 파이프라인 1사이클 | `python scripts/run_update_cycle.py [--gold path] [--k 5]` |
+| 문서 ingestion 파이프라인 | `python scripts/ingest_doc.py <path...> [--daily-cap N] [--min-sources 1]` |
 | 데모 웹앱(채팅) | `WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload` |
 | 데모 Docker 빌드/실행 | `docker build -t wiki-agent-demo .` 후 `docker run ...` |
 
@@ -219,6 +257,15 @@ promote: promoted=True activated=['wiki_gap_how_do_i_implement_pagination_for_a_
 `WIKI_AGENT_DB`는 채팅에서 쓴 DB와 **반드시 같은 파일**을 가리켜야 함 — 직접 새 gap을
 만들어 이 출력을 재현해보는 절차는 위 "위키 자가 갱신 확인하기" 참고.
 
+### 문서 ingestion 파이프라인
+
+```bash
+WIKI_AGENT_DB=/tmp/demo.db python scripts/ingest_doc.py docs/ --daily-cap 5
+```
+
+마크다운 파일/디렉터리를 파싱→청킹→큐레이션→게이트→shadow 반영→평가 기반 승격까지
+1회 실행. 자세한 동작과 멱등성 확인 절차는 위 "외부 문서로 위키 채우기" 참고.
+
 ### 데모 웹앱 / Docker
 
 ```bash
@@ -268,14 +315,16 @@ docker run -d --name wiki-agent-demo \
   개선(recall@5는 이미 1.0으로 천장). (`core/retrieval.py`)
 - **피드백 파이프라인(1사이클)** — `retrieval_log`/`feedback` 로그에서 검색이
   약한 주제를 찾아(mine) LLM으로 위키 엔트리 초안을 만들고(curate), 오염 게이트를
-  통과한 것만 `shadow` 상태로 반영. 게이트의 grounding 체크는 자기모순/기존
-  검증된(active) 엔트리와의 모순/환각을 직접 binary로 판정. 평가 회귀가 없을
-  때만 `active`로 승격, 회귀가 있으면 아무 것도 커밋 안 함. 승격 직전에는 골드셋
-  회귀 체크와 별개로 각 신규 엔트리가 자신을 만든 계기였던 source 질문들로 실제
-  검색되는지(gap_recall)도 확인해, 고정 골드셋이 모르는 새 gap 주제가 진짜로
-  메워졌는지까지 검증.
-  `python scripts/run_update_cycle.py` 한 번 실행으로 이 전체 흐름 동작 확인.
-  (`core/pipeline/`)
+  통과한 것만 `shadow` 상태로 반영. 평가 회귀가 없을 때만 `active`로 승격,
+  회귀가 있으면 아무 것도 커밋 안 함. `python scripts/run_update_cycle.py` 한 번
+  실행으로 이 전체 흐름 동작 확인. (`core/pipeline/`)
+- **문서 ingestion 파이프라인** — 대화 로그가 아니라 사람이 작성한 마크다운 문서를
+  직접 위키에 반영하는 경로. 헤더 기준 파싱(`parse.py`)→청킹(`chunk.py`)→LLM 큐레이션
+  (`curate.curate_doc_chunk`, provenance=`doc_verified`)→기존 게이트/shadow/promote를
+  그대로 재사용. `dedupe.py`가 `entry_id` 결정성 + `chunk_hash` 비교로 콘텐츠가 안 바뀐
+  청크는 LLM 호출 없이 skip해 재실행 비용을 0으로 만듦(멱등성). `python
+  scripts/ingest_doc.py <path>` 로 실행. (`core/pipeline/parse.py`, `chunk.py`,
+  `dedupe.py`, `scripts/ingest_doc.py`)
 - **데모 웹앱** — MCP 외에 사람이 직접 써볼 수 있는 진입점. FastAPI 백엔드가
   `search_wiki`로 먼저 검색하고 그 결과만 근거로 답변하는 고정 RAG 채팅
   엔드포인트(`/chat`)와 피드백 엔드포인트(`/feedback`)를 제공하고, 빌드 단계
