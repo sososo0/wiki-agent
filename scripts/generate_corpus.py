@@ -189,11 +189,39 @@ def build_prompt(category_name: str, guide: str, n: int) -> str:
     )
 
 
-def generate_category(slug: str, category_name: str, guide: str, n: int, model: str) -> str:
+def build_basics_prompt(category_name: str, guide: str, n: int) -> str:
+    """심화 레퍼런스체 대신 초급/중급 학습자용 짧은 정의문 생성(build_prompt와
+    별도 프롬프트 — 기존 advanced 출력에 영향 없음)."""
+    return (
+        f"You are writing beginner-to-intermediate reference material for an "
+        f"internal engineering wiki about distributed systems and backend "
+        f"reliability. The reader is a junior engineer encountering this topic "
+        f"for the first time. Write {n} distinct foundational subtopics under "
+        f"the category \"{category_name}\".\n\n"
+        f"Topics to draw subtopics from (cover a good spread, don't repeat): {guide}\n\n"
+        "Format strictly as markdown:\n"
+        f"# {category_name}\n\n"
+        "## <subtopic title, phrased as a plain question a beginner would ask, "
+        "e.g. \"What Is X?\" or \"Why Do We Need X?\">\n"
+        "<80-150 word plain-language explanation in this order: (1) a one-sentence "
+        "definition with no jargon, (2) why it matters / what problem it solves, "
+        "(3) one simple concrete example or analogy. Do NOT include edge cases, "
+        "tradeoff tables, or advanced variants — that belongs in a different doc. "
+        "No hallucinated statistics or fake case studies. No marketing language.>\n\n"
+        "(repeat ## sections for each subtopic)\n\n"
+        "Output ONLY the markdown, no preamble or commentary."
+    )
+
+
+def generate_category(slug: str, category_name: str, guide: str, n: int, model: str,
+                       difficulty: str = "advanced") -> str:
+    prompt = (build_basics_prompt if difficulty == "basics" else build_prompt)(
+        category_name, guide, n
+    )
     resp = _client().messages.create(
         model=model,
         max_tokens=4096,
-        messages=[{"role": "user", "content": build_prompt(category_name, guide, n)}],
+        messages=[{"role": "user", "content": prompt}],
     )
     text = next((b.text for b in resp.content if b.type == "text"), "")
     return text.strip()
@@ -206,6 +234,9 @@ def main():
     parser.add_argument("--model", default=GEN_MODEL)
     parser.add_argument("--only", nargs="*", default=None,
                          help="지정 시 해당 slug만 생성(재시도/보충용)")
+    parser.add_argument("--difficulty", choices=["advanced", "basics"], default="advanced",
+                         help="basics: 초급/중급 학습자용 짧은 정의문 생성(파일명에 "
+                              "basics_ 접두사 붙어 advanced 출력과 분리됨)")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -216,14 +247,16 @@ def main():
         only = set(args.only)
         categories = [c for c in CATEGORIES if c[0] in only]
 
+    prefix = "basics_" if args.difficulty == "basics" else ""
     for i, (slug, name, guide) in enumerate(categories, start=1):
-        out_path = out_dir / f"{i:02d}_{slug}.md"
+        out_path = out_dir / f"{prefix}{i:02d}_{slug}.md"
         if out_path.exists():
             print(f"[{i:02d}] skip (exists): {out_path.name}")
             continue
         print(f"[{i:02d}] generating: {name} ...")
         try:
-            md = generate_category(slug, name, guide, args.per_category, args.model)
+            md = generate_category(slug, name, guide, args.per_category, args.model,
+                                    difficulty=args.difficulty)
         except Exception as e:
             print(f"  FAILED: {e}")
             continue
