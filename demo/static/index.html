@@ -2,41 +2,165 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>wiki-agent demo</title>
+<title>wiki-agent</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
-  #log { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; min-height: 200px; }
-  .msg { padding: 10px 14px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; }
-  .msg.user { align-self: flex-end; background: #2563eb; color: white; }
-  .msg.bot { align-self: flex-start; background: #f1f5f9; color: #111; }
-  .sources { font-size: 12px; color: #64748b; margin-top: 4px; }
-  .feedback button { border: none; background: none; cursor: pointer; font-size: 16px; opacity: 0.5; }
+  :root { --accent: #2563eb; --bg: #f7f7f8; --border: #e5e7eb; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif; margin: 0; height: 100vh;
+    display: flex; flex-direction: column; background: var(--bg); color: #1f2937;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; background: #fff; border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .logo { font-size: 22px; }
+  .brand h1 { font-size: 16px; margin: 0; }
+  .brand p { font-size: 12px; margin: 0; color: #64748b; }
+  .header-actions { display: flex; gap: 8px; position: relative; }
+  #new-chat, #history-toggle {
+    border: 1px solid var(--border); background: #fff; border-radius: 8px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer; color: #374151;
+  }
+  #new-chat:hover, #history-toggle:hover { background: #f1f5f9; }
+
+  #history-panel {
+    display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 10;
+    width: 320px; max-height: 380px; overflow-y: auto;
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08); padding: 6px;
+  }
+  #history-panel.open { display: block; }
+  #history-panel .empty { padding: 14px; font-size: 13px; color: #94a3b8; text-align: center; }
+  .history-item {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 10px; border-radius: 8px; font-size: 13px; color: #1f2937;
+  }
+  .history-item:hover { background: #f1f5f9; }
+  .history-item.active { background: #eff6ff; }
+  .history-item .preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .history-item .meta { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+
+  main {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .inner { width: 100%; max-width: 680px; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+
+  #intro {
+    background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;
+  }
+  #intro h2 { font-size: 15px; margin: 0 0 8px; }
+  #intro p { font-size: 13px; line-height: 1.6; color: #374151; margin: 0 0 10px; }
+  #intro ul { font-size: 13px; line-height: 1.6; color: #374151; margin: 0; padding-left: 18px; }
+
+  #log { display: flex; flex-direction: column; gap: 12px; }
+  .msg { padding: 10px 14px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; line-height: 1.5; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: white; }
+  .msg.bot { align-self: flex-start; background: #fff; border: 1px solid var(--border); color: #111; }
+  .sources { font-size: 12px; color: #64748b; margin-top: 6px; }
+  .feedback { margin-top: 4px; }
+  .feedback button { border: none; background: none; cursor: pointer; font-size: 15px; opacity: 0.4; }
   .feedback button:hover { opacity: 1; }
-  form { display: flex; gap: 8px; }
-  input[type=text] { flex: 1; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; }
-  button[type=submit] { padding: 10px 16px; border: none; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; }
+
+  form#chat-form {
+    display: flex; justify-content: center; padding: 14px 20px; background: #fff; border-top: 1px solid var(--border);
+  }
+  form#chat-form .inner { display: flex; gap: 8px; padding: 0; }
+  input[type=text] { flex: 1; padding: 11px 14px; border: 1px solid var(--border); border-radius: 10px; font-size: 14px; }
+  button[type=submit] {
+    padding: 10px 18px; border: none; border-radius: 10px; background: var(--accent);
+    color: white; cursor: pointer; font-size: 14px;
+  }
+
+  footer {
+    padding: 14px 20px; background: #fff; border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center;
+  }
+  footer a {
+    color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 600;
+  }
+  footer p { font-size: 12px; color: #64748b; margin: 0; max-width: 560px; }
 </style>
 </head>
 <body>
-  <h2>wiki-agent demo</h2>
-  <div id="log"></div>
+  <header>
+    <div class="brand">
+      <span class="logo">🪶</span>
+      <div>
+        <h1>wiki-agent</h1>
+        <p>자가 갱신형 위키 기반 RAG 어시스턴트</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="history-toggle" type="button">🕘 이전 대화</button>
+      <button id="new-chat" type="button">+ 새 대화</button>
+      <div id="history-panel"></div>
+    </div>
+  </header>
+
+  <main>
+    <div class="inner">
+      <div id="intro">
+        <h2>이 에이전트는 무엇인가요?</h2>
+        <p>
+          이 에이전트는 사내 위키(지식베이스)에서 질문과 관련된 항목을 검색하고,
+          검색된 내용만 근거로 답변합니다. 답변에 쓰인 위키 항목은 매 턴 기록되고,
+          사용자가 남기는 👍/👎 피드백은 위키를 더 정확하게 자동으로 갱신하는 데
+          쓰입니다(AI가 직접 위키를 고치는 게 아니라, 안전장치를 통과한 후보만
+          반영됩니다).
+        </p>
+        <h2 style="margin-top:14px">사용 방법</h2>
+        <ul>
+          <li>알고 싶은 내용을 자연어 질문으로 입력하세요.</li>
+          <li>답변 아래 "근거"에 실제로 참고한 위키 항목 ID가 표시됩니다.</li>
+          <li>답변이 만족스러우면 👍, 아니면 👎를 눌러주세요 — 이 피드백이 위키
+            개선에 직접 쓰입니다.</li>
+          <li>위키 항목들이 어떻게 연결되어 있는지 보고 싶다면 아래 "그래프 보기"를
+            확인하세요.</li>
+        </ul>
+      </div>
+      <div id="log"></div>
+    </div>
+  </main>
+
   <form id="chat-form">
-    <input id="input" type="text" placeholder="질문을 입력하세요..." autocomplete="off" required>
-    <button type="submit">보내기</button>
+    <div class="inner">
+      <input id="input" type="text" placeholder="질문을 입력하세요..." autocomplete="off" required>
+      <button type="submit">보내기</button>
+    </div>
   </form>
 
+  <footer>
+    <a href="/static/graph.html">📊 그래프 보기</a>
+    <p>
+      위키 항목들이 서로 어떻게 연결되어 있는지, 지금 승격 대기 중인 후보는 무엇인지,
+      AI 안전장치(게이트)가 어떤 항목을 막았는지를 시각적으로 보여줍니다.
+    </p>
+  </footer>
+
 <script>
-  const convId = crypto.randomUUID();
-  let turnId = 0;
+  const LS_CONV_ID = "wiki_agent_conv_id";
   const log = document.getElementById("log");
+  const intro = document.getElementById("intro");
   const form = document.getElementById("chat-form");
   const input = document.getElementById("input");
 
+  let convId = localStorage.getItem(LS_CONV_ID);
+  let turnId = 0;
+
+  function hideIntro() {
+    intro.style.display = "none";
+  }
+
   function addMessage(role, text) {
+    hideIntro();
     const div = document.createElement("div");
     div.className = "msg " + role;
     div.textContent = text;
     log.appendChild(div);
+    div.scrollIntoView({ block: "end" });
     return div;
   }
 
@@ -71,6 +195,91 @@
     div.appendChild(fb);
   }
 
+  async function loadConversation(id) {
+    convId = id;
+    localStorage.setItem(LS_CONV_ID, convId);
+    turnId = 0;
+    log.innerHTML = "";
+    intro.style.display = "";
+    try {
+      const resp = await fetch(`/history/${convId}`);
+      const data = await resp.json();
+      for (const t of data.turns || []) {
+        addMessage("user", t.query);
+        addBotMessage(t.answer, (t.retrieved || []).map(id => ({ entry_id: id })), t.turn_id);
+        turnId = t.turn_id + 1;
+      }
+    } catch (e) {
+      // 서버에 기록이 없거나 네트워크 오류 -> 빈 대화로 계속 진행
+    }
+  }
+
+  function startNewConversation() {
+    convId = crypto.randomUUID();
+    localStorage.setItem(LS_CONV_ID, convId);
+    turnId = 0;
+    log.innerHTML = "";
+    intro.style.display = "";
+    closeHistoryPanel();
+  }
+
+  document.getElementById("new-chat").addEventListener("click", startNewConversation);
+
+  const historyToggle = document.getElementById("history-toggle");
+  const historyPanel = document.getElementById("history-panel");
+
+  function closeHistoryPanel() {
+    historyPanel.classList.remove("open");
+  }
+
+  function fmtTime(ts) {
+    return new Date(ts * 1000).toLocaleString("ko-KR", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+  }
+
+  async function openHistoryPanel() {
+    historyPanel.classList.add("open");
+    historyPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
+    const resp = await fetch("/conversations");
+    const data = await resp.json();
+    const convs = data.conversations || [];
+
+    if (!convs.length) {
+      historyPanel.innerHTML = '<div class="empty">아직 대화 기록이 없습니다.</div>';
+      return;
+    }
+
+    historyPanel.innerHTML = "";
+    for (const c of convs) {
+      const btn = document.createElement("button");
+      btn.className = "history-item" + (c.conv_id === convId ? " active" : "");
+      btn.innerHTML = `
+        <div class="preview">${c.title || c.first_query || "(빈 대화)"}</div>
+        <div class="meta">${fmtTime(c.last_ts)} · ${c.turn_count}턴</div>
+      `;
+      btn.addEventListener("click", () => {
+        loadConversation(c.conv_id);
+        closeHistoryPanel();
+      });
+      historyPanel.appendChild(btn);
+    }
+  }
+
+  historyToggle.addEventListener("click", () => {
+    if (historyPanel.classList.contains("open")) {
+      closeHistoryPanel();
+    } else {
+      openHistoryPanel();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!historyPanel.contains(e.target) && e.target !== historyToggle) {
+      closeHistoryPanel();
+    }
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const message = input.value.trim();
@@ -88,6 +297,13 @@
     const data = await resp.json();
     addBotMessage(data.answer, data.retrieved, turn);
   });
+
+  if (!convId) {
+    convId = crypto.randomUUID();
+    localStorage.setItem(LS_CONV_ID, convId);
+  } else {
+    loadConversation(convId);
+  }
 </script>
 </body>
 </html>

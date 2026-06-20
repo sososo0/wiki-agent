@@ -14,6 +14,7 @@ KB에 직접 쓰는 경로는 열지 않는다 — search_wiki/log_turn/submit_f
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from core import graph as graph_module
 from core import wiki_store
 
 DEMO_MODEL = os.environ.get("WIKI_AGENT_DEMO_MODEL", "claude-haiku-4-5")
@@ -57,17 +59,32 @@ def _anthropic_client():
     return _client
 
 
+_HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def _is_korean(text: str) -> bool:
+    return bool(_HANGUL_RE.search(text))
+
+
 def generate(query: str, hits, model: str = DEMO_MODEL) -> str:
-    """검색된 entry만 근거로 답변 생성 (eval/run_eval.py generate()와 동일 패턴)."""
+    """검색된 entry만 근거로 답변 생성 (eval/run_eval.py generate()와 동일 패턴).
+
+    위키 본문은 영어지만 질문은 한국어로도 들어올 수 있어(core/retrieval.py가
+    다국어 임베딩으로 영어 본문을 한국어 질문에 매칭) 답변은 질문과 같은
+    언어로 하도록 명시한다 — 그렇지 않으면 모델이 컨텍스트 언어(영어)를
+    따라가는 경향이 있다."""
     if not hits:
-        return "I don't have information to answer this."
+        return ("관련된 위키 항목을 찾지 못했습니다." if _is_korean(query)
+                 else "I don't have information to answer this.")
     context = "\n".join(
         f"- [{h['entry_id']}] {h['topic']}: {h['canonical']}" for h in hits
     )
     prompt = (
         "Answer the question using ONLY the wiki entries below. Cite the "
         "entry_id you relied on. If the entries don't answer the question, "
-        "say you don't know.\n\n"
+        "say you don't know. Always answer in the same language the "
+        "question was asked in, regardless of the language of the wiki "
+        "entries.\n\n"
         f"Wiki entries:\n{context}\n\nQuestion: {query}"
     )
     resp = _anthropic_client().messages.create(
@@ -76,6 +93,23 @@ def generate(query: str, hits, model: str = DEMO_MODEL) -> str:
         messages=[{"role": "user", "content": prompt}],
     )
     return next((b.text for b in resp.content if b.type == "text"), "")
+
+
+def generate_title(query: str, model: str = DEMO_MODEL) -> str:
+    """대화의 첫 질문을 짧은 제목으로 요약(첫 턴에만 호출, Claude/ChatGPT 스타일
+    "이전 대화" 목록 표시용)."""
+    prompt = (
+        "Summarize the following user question as a short conversation "
+        "title (6 words or fewer, same language as the question, no "
+        "quotes, no trailing period).\n\nQuestion: " + query
+    )
+    resp = _anthropic_client().messages.create(
+        model=model,
+        max_tokens=30,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    title = next((b.text for b in resp.content if b.type == "text"), "").strip()
+    return title or query[:40]
 
 
 class ChatRequest(BaseModel):
@@ -103,6 +137,8 @@ def chat(req: ChatRequest):
         req.conv_id, req.turn_id, req.message, answer,
         [h["entry_id"] for h in hits],
     )
+    if req.turn_id == 0:
+        wiki_store.set_conversation_title(req.conv_id, generate_title(req.message))
     return {"answer": answer, "retrieved": hits}
 
 
@@ -110,3 +146,24 @@ def chat(req: ChatRequest):
 def feedback(req: FeedbackRequest):
     wiki_store.submit_feedback(req.conv_id, req.turn_id, req.thumb)
     return {"ok": True}
+
+
+@app.get("/graph")
+def graph():
+    """위키 그래프 시각화용 읽기 전용 파생 뷰(core/graph.py). KB 쓰기 없음."""
+    return graph_module.build_graph()
+
+
+@app.get("/history/{conv_id}")
+def history(conv_id: str):
+    """conv_id의 대화 로그를 그대로 반환 — 채팅 UI가 새로고침 후에도 이어서
+    보여줄 수 있게 한다(읽기 전용, conversation_log 조회만)."""
+    return {"turns": wiki_store.list_conversation(conv_id)}
+
+
+@app.get("/conversations")
+def conversations():
+    """지금까지의 모든 대화 목록(미리보기 포함)을 반환 — 채팅 UI의 "이전 대화"
+    패널이 conv_id 하나만 기억하는 대신 과거 대화 전체를 보여줄 수 있게 한다
+    (읽기 전용, conversation_log 집계만)."""
+    return {"conversations": wiki_store.list_conversations()}
