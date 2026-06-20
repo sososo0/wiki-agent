@@ -75,21 +75,24 @@ def test_curate_doc_chunk_propagates_llm_fn_errors():
 def test_make_doc_judge_fn_passes_real_chunk_text_not_source_dict(monkeypatch):
     """gate.default_judge_fn은 sources에 "query"가 없는 문서 출처를 dict 그대로
     stringify해 judge에 넘긴다(실제 본문을 못 봄) — make_doc_judge_fn은 entry_id로
-    원본 chunk_text를 찾아 default_doc_judge_fn에 직접 넘겨야 한다."""
+    원본 chunk_text를 찾아 default_doc_judge_fn에 직접 넘겨야 한다. gate.passes_gate가
+    judge_fn(patch, existing_entries) -> (score, reason)으로 호출하므로 그 시그니처를
+    그대로 받아야 한다(existing_entries는 문서 grounding에는 안 쓰지만 받아야 함)."""
     captured = {}
 
     def _stub_default_doc_judge_fn(patch, chunk_text, model=curate.CURATE_MODEL):
         captured["patch"] = patch
         captured["chunk_text"] = chunk_text
-        return 0.95
+        return 0.95, "ok"
 
     monkeypatch.setattr(curate, "default_doc_judge_fn", _stub_default_doc_judge_fn)
 
     chunk_text_by_entry_id = {"wiki_doc_abc": "the real source text"}
     judge_fn = curate.make_doc_judge_fn(chunk_text_by_entry_id)
-    score = judge_fn({"entry_id": "wiki_doc_abc", "topic": "t"})
+    score, reason = judge_fn({"entry_id": "wiki_doc_abc", "topic": "t"}, [])
 
     assert score == 0.95
+    assert reason == "ok"
     assert captured["chunk_text"] == "the real source text"
 
 
@@ -98,11 +101,11 @@ def test_make_doc_judge_fn_defaults_to_empty_text_for_unknown_entry_id(monkeypat
 
     def _stub_default_doc_judge_fn(patch, chunk_text, model=curate.CURATE_MODEL):
         captured["chunk_text"] = chunk_text
-        return 0.0
+        return 0.0, "no match"
 
     monkeypatch.setattr(curate, "default_doc_judge_fn", _stub_default_doc_judge_fn)
 
     judge_fn = curate.make_doc_judge_fn({})
-    judge_fn({"entry_id": "unknown", "topic": "t"})
+    judge_fn({"entry_id": "unknown", "topic": "t"}, [])
 
     assert captured["chunk_text"] == ""
