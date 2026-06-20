@@ -24,7 +24,9 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-EMBED_MODEL = os.environ.get("WIKI_AGENT_EMBED_MODEL", "all-MiniLM-L6-v2")
+EMBED_MODEL = os.environ.get(
+    "WIKI_AGENT_EMBED_MODEL", "paraphrase-multilingual-MiniLM-L12-v2"
+)
 RERANK_MODEL = os.environ.get(
     "WIKI_AGENT_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
 )

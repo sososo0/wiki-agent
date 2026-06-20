@@ -183,6 +183,7 @@ shadow→eval→promote 경로를 탐).
 | 피드백 파이프라인 1사이클 | `python scripts/run_update_cycle.py [--gold path] [--k 5]` |
 | 문서 ingestion 파이프라인 | `python scripts/ingest_doc.py <path...> [--daily-cap N] [--min-sources 1]` |
 | 데모 웹앱(채팅) | `WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload` |
+| 위키 그래프 시각화 | 데모 실행 후 브라우저에서 `/static/graph.html` 접속 (`GET /graph`로 원본 JSON 확인 가능) |
 | 데모 Docker 빌드/실행 | `docker build -t wiki-agent-demo .` 후 `docker run ...` |
 
 ### 서빙 로직 검증
@@ -329,6 +330,46 @@ docker run -d --name wiki-agent-demo \
 ```
 
 자세한 옵션과 주의사항(볼륨 마운트, DB 경로 일치)은 위 "로컬에서 데모 배포하기" 참고.
+
+### 위키 그래프 시각화
+
+`/static/graph.html`은 위키 엔트리를 라이프사이클 상태별(active/shadow/deprecated/
+rejected)로 색칠한 노드와, 그 사이의 관계를 엣지로 그린 인터랙티브 그래프다.
+"AI가 안전장치를 갖고 스스로 갱신하는 위키"라는 이 프로젝트의 핵심 서사(승격 대기 중인
+후보, 게이트가 막은 콘텐츠, 과거 교체 이력)를 한 화면에서 보여준다. 데이터는
+`core/graph.py`의 `build_graph()`(읽기 전용 파생 뷰, DB 쓰기 없음)가 만들고,
+`GET /graph`가 그대로 JSON으로 반환한다.
+
+```bash
+WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
+# 브라우저로 http://localhost:8000/static/graph.html
+```
+
+`GET /graph` 응답 예시:
+
+```json
+{
+  "nodes": [
+    {"id": "wiki_0001", "topic": "Retry backoff strategy", "status": "active", ...},
+    {"id": "wiki_gap_..._abcd", "topic": "...", "status": "shadow", "supersedes": null, ...}
+  ],
+  "edges": [
+    {"source": "wiki_gap_..._abcd", "target": "wiki_0001", "type": "pending_update", "weight": 1.0},
+    {"source": "wiki_0001", "target": "wiki_0005", "type": "similar", "weight": 0.62}
+  ]
+}
+```
+
+엣지 타입: `pending_update`(shadow 후보 → 교체하려는 active 대상, 승격 대기 중),
+`superseded_by`(deprecated 엔트리 → 과거에 대체했던 대상), `similar`(임베딩 코사인
+유사도 기반, 무방향).
+
+**한계**: `supersedes` 컬럼은 마지막 한 단계만 가리켜서, 승격 이후 `superseded_by`
+엣지로 "이게 무엇을 대체했는지"는 보이지만 v1→v2→v3 같은 다단계 버전 이력 전체를
+보존하지는 않는다. `similar` 엣지는 사람이 정의한 토픽 분류가 아니라 코퍼스 원문의
+임베딩 기반이라, 임베딩 모델이 바뀌면 엣지 구성도 바뀐다. 이 엔드포인트는 사람이 보는
+데모 페이지 전용이며 MCP 서버에는 노출하지 않는다(에이전트가 그래프를 통해 KB 내부
+상태를 추론/조작하는 경로를 새로 열지 않기 위함).
 
 ## HARD CONSTRAINTS
 
