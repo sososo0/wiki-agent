@@ -13,7 +13,19 @@ daily_cap/gate/promote는 그대로 재사용 — daily_cap은 wiki_store.count_
 자동으로 합산된다.
 
 콘텐츠가 안 바뀐 청크는 dedupe가 "skip"으로 분류해 curate(LLM 호출)를 아예
-건너뛴다 — 같은 문서를 재실행해도 비용이 들지 않는 멱등성의 핵심.
+건너뛴다 — 같은 문서를 재실행해도 비용이 들지 않는 멱등성의 핵심. 게이트가
+거부한 청크도 동일하게 chunk_hash 기준으로 기억해(status="rejected" 마커,
+dedupe.rejected_entry_id) "skip_rejected"로 분류한다 — 콘텐츠가 그대로인데
+거부된 청크를 재실행마다 다시 큐레이션/judge에 돌려 비용을 반복 지불하지
+않게 한다. 문서 내용이 바뀌면(chunk_hash가 달라지면) 자동으로 새 주소가 되어
+다시 시도된다.
+
+게이트의 grounding judge는 기본적으로 gate.default_judge_fn을 쓰는데, 이건
+sources의 "query" 필드만 읽어서 문서 출처(query 없음)는 source dict 자체를
+stringify해 judge에 넘긴다 — 실제 청크 본문을 한 번도 보지 못한 채 판단하는
+셈이라 거부율이 비정상적으로 높아진다. gate.py는 무수정 대상이라, judge_fn
+미주입 시 curate.make_doc_judge_fn으로 만든 문서 전용 judge(원본 chunk_text를
+직접 프롬프트에 넣음)를 기본값으로 주입한다.
 
 실행: python scripts/ingest_doc.py <path...> [--daily-cap N] [--min-sources 1]
 """
@@ -32,13 +44,16 @@ from core.pipeline import chunk, curate, dedupe, gate, parse, promote, reindex
 
 
 def _existing_entries_by_id() -> Dict[str, Dict[str, Any]]:
-    """active+shadow 엔트리를 entry_id로 합친 dict(+status 태깅). dedupe.py가
-    chunk_hash 비교로 콘텐츠 변경 여부를 판단하는 입력."""
+    """active+shadow+rejected 엔트리를 entry_id로 합친 dict(+status 태깅).
+    dedupe.py가 chunk_hash 비교로 콘텐츠 변경 여부 및 과거 게이트 거부 여부를
+    판단하는 입력."""
     by_id: Dict[str, Dict[str, Any]] = {}
     for e in wiki_store.list_active_entries():
         by_id[e["entry_id"]] = {**e, "status": "active"}
     for e in wiki_store.list_shadow_entries():
         by_id[e["entry_id"]] = {**e, "status": "shadow"}
+    for e in wiki_store.list_rejected_entries():
+        by_id[e["entry_id"]] = {**e, "status": "rejected"}
     return by_id
 
 
@@ -63,6 +78,7 @@ def run_doc_ingest(
         "parsed_files": [],
         "failed_files": [],
         "skipped_chunks": 0,
+        "skipped_rejected_chunks": 0,
         "shadow_written": [],
         "rejected": [],
         "llm_calls": 0,
@@ -82,10 +98,20 @@ def run_doc_ingest(
     existing_active_entries = wiki_store.list_active_entries()
     since_ts = time.time() - 86400
 
+    # judge_fn 미주입 시 문서 전용 grounding judge를 기본으로 쓴다 — gate.py의
+    # default_judge_fn은 sources의 "query" 필드만 읽어서 문서 출처(query 없음)는
+    # source dict를 그대로 stringify해 judge에 넘기게 되어 실제 청크 본문을 보지
+    # 못한다(gate.py는 무수정 대상). chunk_text_by_entry_id는 후보를 처리하며 채움.
+    chunk_text_by_entry_id: Dict[str, str] = {}
+    doc_judge_fn = judge_fn or curate.make_doc_judge_fn(chunk_text_by_entry_id)
+
     for cand in candidates:
         op_info = dedupe.resolve_doc_chunk_op(cand, existing_by_id)
         if op_info["op"] == "skip":
             summary["skipped_chunks"] += 1
+            continue
+        if op_info["op"] == "skip_rejected":
+            summary["skipped_rejected_chunks"] += 1
             continue
 
         summary["llm_calls"] += 1
@@ -101,6 +127,7 @@ def run_doc_ingest(
         patch["entry_id"] = op_info["entry_id"]
         if op_info["supersedes"]:
             patch["supersedes"] = op_info["supersedes"]
+        chunk_text_by_entry_id[patch["entry_id"]] = cand["text"]
 
         # 새 버전이 대체하려는 자기 자신과는 "근접 중복"으로 막히면 안 되므로 게이트
         # 중복/모순 체크 대상에서 제외한다(의도된 갱신, 우연한 중복이 아님).
@@ -116,10 +143,19 @@ def run_doc_ingest(
             existing_entries=gate_existing,
             daily_cap=daily_cap,
             min_sources=min_sources,
-            judge_fn=judge_fn,
+            judge_fn=doc_judge_fn,
         )
         if not ok:
             summary["rejected"].append({"entry_id": patch["entry_id"], "reason": reason})
+            rej_id = dedupe.rejected_entry_id(cand)
+            wiki_store.add_entry(
+                rej_id, patch["topic"], patch["canonical"], patch["body_md"],
+                status="rejected", provenance=patch["provenance"], confidence=0.0,
+                sources=[{**patch["sources"][0], "verified": False, "rejected_reason": reason}],
+            )
+            existing_by_id[rej_id] = {"status": "rejected", "version": 1, "sources": [
+                {"chunk_hash": cand["chunk_hash"]}
+            ]}
             continue
 
         wiki_store.add_entry(
@@ -161,6 +197,7 @@ def main():
     if result["failed_files"]:
         print(f"failed files: {result['failed_files']}")
     print(f"skipped chunks (unchanged): {result['skipped_chunks']}")
+    print(f"skipped chunks (already rejected, unchanged): {result['skipped_rejected_chunks']}")
     print(f"llm calls: {result['llm_calls']}")
     print(f"shadow written: {result['shadow_written']}")
     print(f"rejected: {result['rejected']}")

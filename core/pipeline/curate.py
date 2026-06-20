@@ -166,3 +166,44 @@ def curate_doc_chunk(
         }],
         "reason": f"doc_path={candidate['doc_path']} chunk_index={candidate['chunk_index']}",
     }
+
+
+def default_doc_judge_fn(patch: Dict[str, Any], chunk_text: str, model: str = CURATE_MODEL) -> float:
+    """gate.default_judge_fn과 동일한 0~1 grounding 점수를 매기지만, 그쪽은
+    `s.get('query', s)`로 source를 텍스트화해서 문서 출처(query 필드 없음)에서는
+    source dict를 그대로 stringify해 judge에 넘기는 문제가 있다(실제 청크 본문을
+    한 번도 보지 못함) — gate.py는 무수정 대상이라, 여기서 원본 chunk_text를
+    직접 프롬프트에 넣는 문서 전용 judge를 만들어 ingest_doc.py가 주입한다."""
+    prompt = (
+        "You are reviewing a candidate knowledge-base entry before it is "
+        "merged. Judge whether the entry content is grounded in the source "
+        "document text below (no fabricated facts, no internal "
+        "contradiction). Reply with a single number between 0 and 1 "
+        "(1 = fully grounded, 0 = fabricated/contradictory), nothing else.\n\n"
+        f"Entry topic: {patch.get('topic')}\n"
+        f"Entry canonical: {patch.get('canonical')}\n"
+        f"Entry body: {patch.get('body_md')}\n\n"
+        f"Source document text:\n{chunk_text}"
+    )
+    resp = _anthropic_client().messages.create(
+        model=model,
+        max_tokens=5,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = next((b.text for b in resp.content if b.type == "text"), "0")
+    match = re.search(r"[01](?:\.\d+)?", text)
+    return float(match.group()) if match else 0.0
+
+
+def make_doc_judge_fn(
+    chunk_text_by_entry_id: Dict[str, str],
+    *,
+    model: str = CURATE_MODEL,
+) -> Callable[[Dict[str, Any]], float]:
+    """entry_id -> 원본 chunk 텍스트 매핑(클로저로 참조, ingest_doc.py가 candidate를
+    돌면서 채움)을 들고 있는 judge_fn을 만들어 반환. gate.passes_gate(judge_fn=...)에
+    그대로 주입 가능."""
+    def _judge(patch: Dict[str, Any]) -> float:
+        chunk_text = chunk_text_by_entry_id.get(patch.get("entry_id"), "")
+        return default_doc_judge_fn(patch, chunk_text, model=model)
+    return _judge

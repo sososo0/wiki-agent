@@ -6,6 +6,8 @@ scripts/ingest_doc.py의 통합 테스트(tmp DB + tmp 마크다운 파일). 증
 2) 동일 입력 재실행 -> chunk_hash 불변이므로 llm 호출 0회, shadow_written == [].
 3) 문서 일부 수정 후 재실행 -> 바뀐 섹션만 새 candidate가 생겨 처리됨.
 4) 실패 파일(읽기 불가/너무 큰 파일)이 섞여도 나머지 파일은 정상 처리됨.
+5) 게이트가 거부한 청크는 콘텐츠가 안 바뀌면 재실행 시 LLM을 다시 호출하지
+   않음(skip_rejected) — 문서가 바뀌면 다시 시도됨.
 
 test_run_update_cycle.py와 동일 패턴: tmp DB + 전부 stub 주입으로 오프라인 실행.
 
@@ -156,3 +158,63 @@ def test_ingest_isolates_failed_files(tmp_path, monkeypatch):
     assert len(result["failed_files"]) == 1
     assert result["failed_files"][0]["path"] == str(bad_path)
     assert len(result["shadow_written"]) == 2
+
+
+def _stub_judge_fn_rejects_rate_limiting(patch):
+    return 0.1 if "rate limiting" in patch["topic"].lower() else 1.0
+
+
+def test_ingest_does_not_recurate_unchanged_rejected_chunk(tmp_path, monkeypatch):
+    _init_db(tmp_path, monkeypatch)
+    doc_path = tmp_path / "doc.md"
+    doc_path.write_text(DOC_TEXT, encoding="utf-8")
+
+    first = run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn_rejects_rate_limiting,
+        evaluate_fn=_stub_evaluate_fn,
+    )
+    assert len(first["rejected"]) == 1
+    assert first["llm_calls"] == 2
+
+    second = run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn_rejects_rate_limiting,
+        evaluate_fn=_stub_evaluate_fn,
+    )
+
+    # Retries 섹션은 이미 active(skip), Rate limiting 섹션은 이전에 거부된 동일
+    # 콘텐츠라 skip_rejected -> 어느 쪽도 LLM을 다시 호출하지 않아야 한다.
+    assert second["llm_calls"] == 0
+    assert second["skipped_chunks"] == 1
+    assert second["skipped_rejected_chunks"] == 1
+    assert second["rejected"] == []
+    assert second["shadow_written"] == []
+
+
+def test_ingest_retries_rejected_chunk_after_content_changes(tmp_path, monkeypatch):
+    _init_db(tmp_path, monkeypatch)
+    doc_path = tmp_path / "doc.md"
+    doc_path.write_text(DOC_TEXT, encoding="utf-8")
+
+    run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn_rejects_rate_limiting,
+        evaluate_fn=_stub_evaluate_fn,
+    )
+
+    changed_text = DOC_TEXT.replace(
+        "key, returning HTTP 429",
+        "key (per-IP fallback when no key is present), returning HTTP 429",
+    )
+    doc_path.write_text(changed_text, encoding="utf-8")
+
+    result = run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn_rejects_rate_limiting,
+        evaluate_fn=_stub_evaluate_fn,
+    )
+
+    assert result["llm_calls"] == 1
+    assert result["skipped_rejected_chunks"] == 0
+    assert len(result["rejected"]) == 1

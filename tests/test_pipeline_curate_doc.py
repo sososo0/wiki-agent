@@ -1,7 +1,8 @@
 """
 wiki-agent / tests / test_pipeline_curate_doc.py
 
-curate_doc_chunk()의 patch 구조/필수 필드를 스텁 llm_fn으로 검증. 네트워크 없음.
+curate_doc_chunk()의 patch 구조/필수 필드를 스텁 llm_fn으로 검증, make_doc_judge_fn이
+entry_id로 원본 chunk_text를 찾아 default_doc_judge_fn에 넘기는지 검증. 네트워크 없음.
 
 실행: pytest
 """
@@ -69,3 +70,39 @@ def test_curate_doc_chunk_propagates_llm_fn_errors():
     import pytest
     with pytest.raises(ValueError):
         curate.curate_doc_chunk(CANDIDATE, llm_fn=_broken_llm_fn)
+
+
+def test_make_doc_judge_fn_passes_real_chunk_text_not_source_dict(monkeypatch):
+    """gate.default_judge_fn은 sources에 "query"가 없는 문서 출처를 dict 그대로
+    stringify해 judge에 넘긴다(실제 본문을 못 봄) — make_doc_judge_fn은 entry_id로
+    원본 chunk_text를 찾아 default_doc_judge_fn에 직접 넘겨야 한다."""
+    captured = {}
+
+    def _stub_default_doc_judge_fn(patch, chunk_text, model=curate.CURATE_MODEL):
+        captured["patch"] = patch
+        captured["chunk_text"] = chunk_text
+        return 0.95
+
+    monkeypatch.setattr(curate, "default_doc_judge_fn", _stub_default_doc_judge_fn)
+
+    chunk_text_by_entry_id = {"wiki_doc_abc": "the real source text"}
+    judge_fn = curate.make_doc_judge_fn(chunk_text_by_entry_id)
+    score = judge_fn({"entry_id": "wiki_doc_abc", "topic": "t"})
+
+    assert score == 0.95
+    assert captured["chunk_text"] == "the real source text"
+
+
+def test_make_doc_judge_fn_defaults_to_empty_text_for_unknown_entry_id(monkeypatch):
+    captured = {}
+
+    def _stub_default_doc_judge_fn(patch, chunk_text, model=curate.CURATE_MODEL):
+        captured["chunk_text"] = chunk_text
+        return 0.0
+
+    monkeypatch.setattr(curate, "default_doc_judge_fn", _stub_default_doc_judge_fn)
+
+    judge_fn = curate.make_doc_judge_fn({})
+    judge_fn({"entry_id": "unknown", "topic": "t"})
+
+    assert captured["chunk_text"] == ""

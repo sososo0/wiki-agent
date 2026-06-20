@@ -143,17 +143,22 @@ docker run -d --name wiki-agent-demo \
 나누고, `chunk.py`가 `max_chars`(기본 2000자) 상한으로 청크를 만든다. 각 청크는
 `dedupe.py`가 `entry_id`(파일 경로+섹션 위치로 결정적)와 `chunk_hash`(내용 기반)를
 비교해 콘텐츠가 그대로면 LLM 호출 없이 건너뛴다(skip) — 같은 문서를 몇 번 재실행해도
-변경된 섹션만 비용이 든다. 나머지는 기존 게이트/shadow/promote를 그대로 통과한다.
-provenance는 `doc_verified`(사람이 쓴 문서가 출처이므로 로그 마이닝의
-`curated_from_logs`보다 신뢰도가 높음).
+변경된 섹션만 비용이 든다. 게이트가 거부한 청크도 동일하게 `chunk_hash` 기준으로
+기억해(`status="rejected"` 마커) 콘텐츠가 안 바뀌었으면 재실행 시 다시 큐레이션/judge에
+돌리지 않는다(skip_rejected) — 문서 내용이 바뀌면(`chunk_hash` 변경) 자동으로 새 주소가
+되어 다시 시도된다. 나머지는 기존 게이트/shadow/promote를 그대로 통과한다. provenance는
+`doc_verified`(사람이 쓴 문서가 출처이므로 로그 마이닝의 `curated_from_logs`보다
+신뢰도가 높음).
 
 ```bash
 WIKI_AGENT_DB=/tmp/demo.db python scripts/ingest_doc.py docs/ --daily-cap 5
 ```
 
-stdout에서 `parsed_files`/`skipped_chunks`/`llm_calls`/`shadow_written`/`rejected`/
-`promote` 확인. 같은 명령을 다시 실행하면 `skipped_chunks`가 전체 청크 수와 같고
-`llm_calls: 0`, `shadow_written: []`이어야 함(멱등성). 문서 일부를 수정한 뒤
+stdout에서 `parsed_files`/`skipped_chunks`/`skipped_rejected_chunks`/`llm_calls`/
+`shadow_written`/`rejected`/`promote` 확인. 같은 명령을 다시 실행하면 `skipped_chunks` +
+`skipped_rejected_chunks`가 전체 청크 수와 같고 `llm_calls: 0`, `shadow_written: []`,
+`rejected: []`이어야 함(멱등성 — 게이트 거부분도 콘텐츠가 그대로면 재시도하지 않음).
+문서 일부를 수정한 뒤
 재실행하면 바뀐 섹션만 새 shadow 후보가 생긴다 — 이미 `active`인 엔트리의 내용이
 바뀐 경우엔 같은 entry_id를 직접 덮어쓰지 않고 `{entry_id}_v{n}` + `supersedes`로
 새 shadow를 만들어 게이트를 다시 거치게 한다(HARD CONSTRAINT: active 갱신도 반드시

@@ -226,6 +226,22 @@ def list_shadow_entries() -> List[Dict[str, Any]]:
     ]
 
 
+def list_rejected_entries() -> List[Dict[str, Any]]:
+    """status='rejected' 엔트리 전체를 반환. 문서 ingestion이 게이트 거부를
+    chunk_hash 단위로 기억해(core/pipeline/dedupe.rejected_entry_id) 같은
+    콘텐츠를 재실행마다 다시 LLM 큐레이션/judge에 돌리지 않게 하는 입력 —
+    이 status는 active/shadow 어느 쪽에도 안 잡혀 검색·승격에 영향 없다."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT entry_id, topic, canonical, body_md, confidence, version, sources
+           FROM wiki_entry WHERE status = 'rejected'""").fetchall()
+    conn.close()
+    return [
+        {**dict(r), "sources": json.loads(r["sources"]) if r["sources"] else []}
+        for r in rows
+    ]
+
+
 def count_entries(status: str, since_ts: float = None) -> int:
     """주어진 status의 엔트리 수(일일 신규 shadow 상한 계산용)."""
     conn = _conn()
