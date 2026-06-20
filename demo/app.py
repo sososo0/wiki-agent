@@ -49,6 +49,7 @@ app = FastAPI(title="wiki-agent demo", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _client = None
+_graph_embed_cache: dict = {}
 
 
 def _anthropic_client():
@@ -150,8 +151,12 @@ def feedback(req: FeedbackRequest):
 
 @app.get("/graph")
 def graph():
-    """위키 그래프 시각화용 읽기 전용 파생 뷰(core/graph.py). KB 쓰기 없음."""
-    return graph_module.build_graph()
+    """위키 그래프 시각화용 읽기 전용 파생 뷰(core/graph.py). KB 쓰기 없음.
+
+    프로세스 생애 동안 유지되는 _graph_embed_cache를 넘겨 코퍼스가 커져도
+    바뀌지 않은 엔트리는 매 요청마다 재인코딩하지 않게 한다(core/graph.py
+    build_graph()의 cache 인자, entry_id+version 키로 자동 무효화)."""
+    return graph_module.build_graph(cache=_graph_embed_cache)
 
 
 @app.get("/history/{conv_id}")
