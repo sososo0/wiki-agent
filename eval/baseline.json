@@ -1,7 +1,10 @@
 {
   "k": 5,
-  "n": 20,
+  "n": 32,
+  "n_answerable": 27,
+  "n_unanswerable": 5,
   "recall@k": 1.0,
-  "mrr": 0.9349999999999999,
-  "correctness": 0.35
+  "mrr": 0.7895061728395062,
+  "correctness": 0.5925925925925926,
+  "escalation_correctness": 0.8
 }
