@@ -183,12 +183,21 @@ def _bm25_rank(query: str, limit: int) -> List[str]:
     return [r["entry_id"] for r in rows]
 
 
-def search_wiki(query: str, k: int = 5) -> List[Dict[str, Any]]:
-    """BM25 + dense + RRF + rerank 하이브리드 검색 후 결과를 반환하고 retrieval_log에 적재."""
+def search_wiki(query: str, k: int = 5, *, cache: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    """BM25 + dense + RRF + rerank 하이브리드 검색 후 결과를 반환하고 retrieval_log에 적재.
+
+    cache를 안 주면(기본값) 매 호출 새 dict로 항상 전체 재인코딩 — 기존 동작/테스트와
+    동일(서로 다른 embed_fn을 쓰는 테스트들이 같은 entry_id+version을 캐시 충돌
+    없이 공유할 수 있어야 함). 오래 사는 프로세스(데모 서버 등)는 자신이 들고 있는
+    dict를 넘겨 코퍼스가 커져도 매 쿼리 재인코딩 비용이 늘지 않게 한다(core/retrieval.py
+    hybrid_search의 cache 인자, core/graph.py와 동일 패턴)."""
     fetch_k = max(k * 4, 20)
     bm25_ids = _bm25_rank(query, fetch_k)
     entries = list_active_entries()
-    results = retrieval.hybrid_search(query, entries, bm25_ids, k=k, fetch_k=fetch_k)
+    results = retrieval.hybrid_search(
+        query, entries, bm25_ids, k=k, fetch_k=fetch_k,
+        cache=cache if cache is not None else {},
+    )
 
     conn = _conn()
     conn.execute(

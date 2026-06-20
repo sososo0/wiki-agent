@@ -27,7 +27,7 @@ load_dotenv(ROOT / ".env")
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -50,6 +50,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _client = None
 _graph_embed_cache: dict = {}
+_search_embed_cache: dict = {}
 
 
 def _anthropic_client():
@@ -130,16 +131,23 @@ def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+def _title_task(conv_id: str, message: str) -> None:
+    wiki_store.set_conversation_title(conv_id, generate_title(message))
+
+
 @app.post("/chat")
-def chat(req: ChatRequest):
-    hits = wiki_store.search_wiki(req.message, k=5)
+def chat(req: ChatRequest, background_tasks: BackgroundTasks):
+    hits = wiki_store.search_wiki(req.message, k=5, cache=_search_embed_cache)
     answer = generate(req.message, hits)
     wiki_store.log_turn(
         req.conv_id, req.turn_id, req.message, answer,
         [h["entry_id"] for h in hits],
     )
     if req.turn_id == 0:
-        wiki_store.set_conversation_title(req.conv_id, generate_title(req.message))
+        # 제목 생성은 답변과 무관하므로 응답을 블로킹하지 않고 응답 전송 후
+        # 백그라운드로 돌린다(이전엔 동기 호출이라 매 첫 턴마다 추가 LLM
+        # 호출 레이턴시를 그대로 사용자가 기다려야 했음).
+        background_tasks.add_task(_title_task, req.conv_id, req.message)
     return {"answer": answer, "retrieved": hits}
 
 

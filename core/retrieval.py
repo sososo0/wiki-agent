@@ -67,11 +67,44 @@ def default_rerank_fn(query: str, texts: Sequence[str]) -> List[float]:
     return [float(s) for s in scores]
 
 
-def _dense_rank(query: str, entries: List[Dict], embed_fn: Callable) -> List[str]:
+def _entry_vectors(
+    entries: List[Dict], embed_fn: Callable, cache: Dict[str, Tuple[Optional[int], np.ndarray]]
+) -> np.ndarray:
+    """entry_id+version으로 캐시 적중하는 엔트리는 재인코딩을 건너뛴다(core/graph.py
+    _get_node_vectors와 동일 패턴). 코퍼스가 커질수록(1000+) 매 쿼리마다 entries
+    전체를 재인코딩하는 비용이 체감 지연이 되므로 도입 — cache를 안 주면(기본 None
+    -> 호출부가 매번 새 dict) 항상 전체 재인코딩해 기존 동작/테스트와 동일하다."""
+    vecs: List[Optional[np.ndarray]] = [None] * len(entries)
+    miss_idx: List[int] = []
+    miss_texts: List[str] = []
+
+    for i, e in enumerate(entries):
+        hit = cache.get(e["entry_id"])
+        if hit is not None and hit[0] == e.get("version"):
+            vecs[i] = hit[1]
+        else:
+            miss_idx.append(i)
+            miss_texts.append(_entry_text(e))
+
+    if miss_texts:
+        new_vecs = np.asarray(embed_fn(miss_texts))
+        for k, i in enumerate(miss_idx):
+            vecs[i] = new_vecs[k]
+            cache[entries[i]["entry_id"]] = (entries[i].get("version"), new_vecs[k])
+
+    return np.asarray(vecs)
+
+
+def _dense_rank(
+    query: str,
+    entries: List[Dict],
+    embed_fn: Callable,
+    cache: Optional[Dict[str, Tuple[Optional[int], np.ndarray]]] = None,
+) -> List[str]:
     """entries 전체에 대해 쿼리와의 코사인 유사도 내림차순으로 entry_id를 반환."""
     if not entries:
         return []
-    vecs = np.asarray(embed_fn([_entry_text(e) for e in entries]))
+    vecs = _entry_vectors(entries, embed_fn, cache if cache is not None else {})
     q_vec = np.asarray(embed_fn([query])[0])
     sims = vecs @ q_vec  # normalize_embeddings=True 이므로 내적 = 코사인 유사도
     order = np.argsort(-sims)
@@ -97,17 +130,21 @@ def hybrid_search(
     fetch_k: int = 20,
     embed_fn: Optional[Callable] = None,
     rerank_fn: Optional[Callable] = None,
+    cache: Optional[Dict[str, Tuple[Optional[int], np.ndarray]]] = None,
 ) -> List[Dict]:
     """BM25 + dense 랭킹을 RRF로 합치고 cross-encoder로 재정렬해 상위 k개를 반환.
 
     반환 shape은 search_wiki()와 동일: entry_id/topic/canonical/score/confidence.
     embed_fn/rerank_fn을 주입하면(테스트용) 실제 모델을 로딩하지 않고 검증 가능.
+    cache를 주면(entry_id+version 키) 호출부가 들고 있는 동안 콘텐츠가 안 바뀐
+    엔트리는 재인코딩을 건너뛴다 — 안 주면(기본값) 매 호출 전체 재인코딩이라
+    기존 동작과 동일(테스트 격리에 영향 없음, core/graph.py와 동일 패턴).
     """
     embed_fn = embed_fn or default_embed_fn
     rerank_fn = rerank_fn or default_rerank_fn
 
     by_id = {e["entry_id"]: e for e in entries}
-    dense_ids = _dense_rank(query, entries, embed_fn)
+    dense_ids = _dense_rank(query, entries, embed_fn, cache)
     fused = reciprocal_rank_fusion([bm25_ranked_ids[:fetch_k], dense_ids[:fetch_k]])
     candidate_ids = [eid for eid, _ in fused[:fetch_k] if eid in by_id]
     if not candidate_ids:
