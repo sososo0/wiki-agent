@@ -114,6 +114,7 @@ def main():
           f"activated={promote_result['activated_entry_ids']}")
     print(f"  base:      {promote_result['base']}")
     print(f"  candidate: {promote_result['candidate']}")
+    print(f"  gap_recall: {promote_result['gap_recall']}")
 
 
 if __name__ == "__main__":

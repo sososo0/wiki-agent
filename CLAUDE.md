@@ -13,6 +13,7 @@
 ## 이미 구현됨 — 재작성 금지, 위에서 빌드
 core/wiki_store.py, serving/mcp_server.py, test_client.py (서빙 레이어 완료)
 core/pipeline/parse.py·chunk.py·dedupe.py, scripts/ingest_doc.py (문서 ingestion 완료)
+eval/run_eval.py(qualitative rubric 옵트인 포함), eval/agentic_eval.py(멀티홉 진단, 게이트 미연결)
 
 ## HARD CONSTRAINTS (항상 적용)
 - 평가 우선: 갱신 기능보다 eval 하니스 먼저.
@@ -24,7 +25,8 @@ core/pipeline/parse.py·chunk.py·dedupe.py, scripts/ingest_doc.py (문서 inges
 
 ## 명령
 - 로직 검증: python test_client.py        # "ALL CHECKS PASSED" 기대
-- 평가:     python eval/run_eval.py        # (구현 후)
+- 평가:     python eval/run_eval.py [--qualitative]
+- 에이전틱 평가(진단용): python eval/agentic_eval.py
 - MCP 서버: python serving/mcp_server.py   # stdio
 - 문서 ingestion: python scripts/ingest_doc.py <path> [--daily-cap N]
 

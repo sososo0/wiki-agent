@@ -18,3 +18,8 @@
 {"q": "What does the server do with an idempotency key on a write request?", "gold_entry_ids": ["wiki_0005"], "must_contain": ["stores the result keyed by it", "returns the same result on retry"], "gold_answer": "It stores the result keyed by that idempotency key and returns the same stored result if the same key is sent again."}
 {"q": "Why are idempotency keys important when retries are involved?", "gold_entry_ids": ["wiki_0005"], "must_contain": ["non-idempotent operations like payments", "combined with retries"], "gold_answer": "They make retries safe for non-idempotent operations like payments, preventing the write from being applied twice."}
 {"q": "What does a client need to send to make a write request safe to retry?", "gold_entry_ids": ["wiki_0005"], "must_contain": ["a unique key with the write"], "gold_answer": "A unique idempotency key alongside the write request."}
+{"q": "How do I configure TLS termination on a Kubernetes ingress controller?", "gold_entry_ids": [], "must_contain": [], "gold_answer": null, "unanswerable": true}
+{"q": "What's the recommended way to set up an OAuth2 PKCE flow for a mobile app?", "gold_entry_ids": [], "must_contain": [], "gold_answer": null, "unanswerable": true}
+{"q": "How should I tune autovacuum settings in PostgreSQL for a write-heavy table?", "gold_entry_ids": [], "must_contain": [], "gold_answer": null, "unanswerable": true}
+{"q": "What compression algorithm does gRPC use by default for streaming responses?", "gold_entry_ids": [], "must_contain": [], "gold_answer": null, "unanswerable": true}
+{"q": "How do I configure cache invalidation for a CDN when origin content changes?", "gold_entry_ids": [], "must_contain": [], "gold_answer": null, "unanswerable": true}
