@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>wiki-agent graph</title>
+<script src="https://unpkg.com/vis-network@9/standalone/umd/vis-network.min.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 0; }
+  header { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 16px; }
+  header h2 { margin: 0; font-size: 18px; }
+  header a { color: #2563eb; text-decoration: none; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: #475569; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  #wrap { display: flex; height: calc(100vh - 49px); }
+  #network { flex: 1; }
+  #panel { width: 320px; border-left: 1px solid #e2e8f0; padding: 16px; overflow-y: auto; font-size: 14px; }
+  #panel h3 { margin-top: 0; }
+  #panel .field { margin-bottom: 10px; }
+  #panel .field b { display: block; color: #64748b; font-size: 12px; text-transform: uppercase; }
+  #empty-hint { color: #94a3b8; }
+</style>
+</head>
+<body>
+<header>
+  <h2>wiki-agent graph</h2>
+  <a href="/">← 채팅으로</a>
+  <div class="legend">
+    <span><span class="dot" style="background:#2563eb"></span>active</span>
+    <span><span class="dot" style="background:#f59e0b"></span>shadow (승격 대기)</span>
+    <span><span class="dot" style="background:#94a3b8"></span>deprecated</span>
+    <span><span class="dot" style="background:#ef4444"></span>rejected (게이트 차단)</span>
+  </div>
+</header>
+<div id="wrap">
+  <div id="network"></div>
+  <div id="panel"><p id="empty-hint">노드를 클릭하면 상세 정보가 표시됩니다.</p></div>
+</div>
+
+<script>
+  const STATUS_STYLE = {
+    active:     { color: { background: "#2563eb", border: "#2563eb" }, shapeProperties: { borderDashes: false } },
+    shadow:     { color: { background: "#fef3c7", border: "#f59e0b" }, shapeProperties: { borderDashes: [4, 4] } },
+    deprecated: { color: { background: "#e2e8f0", border: "#94a3b8" }, shapeProperties: { borderDashes: false }, opacity: 0.5 },
+    rejected:   { color: { background: "#fee2e2", border: "#ef4444" }, shapeProperties: { borderDashes: [2, 2] } },
+  };
+
+  const EDGE_STYLE = {
+    pending_update: { color: "#f59e0b", dashes: true, arrows: "to" },
+    superseded_by:  { color: "#94a3b8", dashes: true, arrows: "to" },
+    similar:        { color: "#cbd5e1", dashes: false, arrows: "" },
+  };
+
+  function toVisNode(n) {
+    const style = STATUS_STYLE[n.status] || STATUS_STYLE.active;
+    return {
+      id: n.id,
+      label: n.topic || n.id,
+      shape: "dot",
+      size: 14,
+      ...style,
+      raw: n,
+    };
+  }
+
+  function toVisEdge(e, idx) {
+    const style = EDGE_STYLE[e.type] || EDGE_STYLE.similar;
+    return {
+      id: idx,
+      from: e.source,
+      to: e.target,
+      width: e.type === "similar" ? Math.max(1, e.weight * 4) : 2,
+      ...style,
+    };
+  }
+
+  function renderDetail(n) {
+    const panel = document.getElementById("panel");
+    panel.innerHTML = `
+      <h3>${n.topic || n.id}</h3>
+      <div class="field"><b>entry_id</b>${n.id}</div>
+      <div class="field"><b>status</b>${n.status}</div>
+      <div class="field"><b>canonical</b>${n.canonical || ""}</div>
+      <div class="field"><b>body_md</b>${n.body_md || ""}</div>
+      <div class="field"><b>provenance</b>${n.provenance || ""}</div>
+      <div class="field"><b>confidence</b>${n.confidence ?? ""}</div>
+      ${n.rejected_reason ? `<div class="field"><b>rejected_reason</b>${n.rejected_reason}</div>` : ""}
+    `;
+  }
+
+  async function main() {
+    const resp = await fetch("/graph");
+    const data = await resp.json();
+
+    if (!data.nodes.length) {
+      document.getElementById("empty-hint").textContent = "아직 위키 엔트리가 없습니다.";
+      return;
+    }
+
+    const nodes = new vis.DataSet(data.nodes.map(toVisNode));
+    const edges = new vis.DataSet(data.edges.map(toVisEdge));
+    const network = new vis.Network(
+      document.getElementById("network"),
+      { nodes, edges },
+      {
+        physics: { stabilization: true },
+        interaction: { hover: true },
+        edges: { smooth: false },
+      }
+    );
+
+    network.on("click", (params) => {
+      if (!params.nodes.length) return;
+      const node = nodes.get(params.nodes[0]);
+      renderDetail(node.raw);
+    });
+  }
+
+  main();
+</script>
+</body>
+</html>

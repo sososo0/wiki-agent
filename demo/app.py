@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from core import graph as graph_module
 from core import wiki_store
 
 DEMO_MODEL = os.environ.get("WIKI_AGENT_DEMO_MODEL", "claude-haiku-4-5")
@@ -110,3 +111,9 @@ def chat(req: ChatRequest):
 def feedback(req: FeedbackRequest):
     wiki_store.submit_feedback(req.conv_id, req.turn_id, req.thumb)
     return {"ok": True}
+
+
+@app.get("/graph")
+def graph():
+    """위키 그래프 시각화용 읽기 전용 파생 뷰(core/graph.py). KB 쓰기 없음."""
+    return graph_module.build_graph()

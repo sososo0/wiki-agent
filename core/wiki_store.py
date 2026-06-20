@@ -152,7 +152,8 @@ def list_active_entries() -> List[Dict[str, Any]]:
     판단해야 하기 때문(검색 경로 자체는 sources를 쓰지 않으므로 영향 없음)."""
     conn = _conn()
     rows = conn.execute(
-        """SELECT entry_id, topic, canonical, body_md, confidence, version, sources
+        """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
+                  version, sources
            FROM wiki_entry WHERE status = 'active'""").fetchall()
     conn.close()
     return [
@@ -233,8 +234,26 @@ def list_rejected_entries() -> List[Dict[str, Any]]:
     이 status는 active/shadow 어느 쪽에도 안 잡혀 검색·승격에 영향 없다."""
     conn = _conn()
     rows = conn.execute(
-        """SELECT entry_id, topic, canonical, body_md, confidence, version, sources
+        """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
+                  version, sources, supersedes
            FROM wiki_entry WHERE status = 'rejected'""").fetchall()
+    conn.close()
+    return [
+        {**dict(r), "sources": json.loads(r["sources"]) if r["sources"] else []}
+        for r in rows
+    ]
+
+
+def list_deprecated_entries() -> List[Dict[str, Any]]:
+    """status='deprecated' 엔트리 전체를 반환. promote.py가 shadow를 승격시키며
+    supersedes 대상이 있던 shadow 자신의 entry_id를 이 status로 강등시킨다
+    (promote.py:138-139) — supersedes 컬럼은 강등 후에도 그대로 남아 있어
+    "과거에 어떤 active 엔트리를 대체하려 했는지" 이력으로 읽을 수 있다."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
+                  version, sources, supersedes
+           FROM wiki_entry WHERE status = 'deprecated'""").fetchall()
     conn.close()
     return [
         {**dict(r), "sources": json.loads(r["sources"]) if r["sources"] else []}
