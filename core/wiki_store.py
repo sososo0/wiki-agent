@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS conversation_log (
 CREATE TABLE IF NOT EXISTS feedback (
   conv_id TEXT, turn_id INTEGER, thumb TEXT, ts REAL
 );
+
+-- 대화별 표시용 제목(첫 턴에 1회 생성). conversation_log의 원본 질문/답변과는
+-- 별개로, "이전 대화" 목록 UI가 매번 다시 요약하지 않도록 캐시해 둔다.
+CREATE TABLE IF NOT EXISTS conversation_meta (
+  conv_id TEXT PRIMARY KEY, title TEXT, created_at REAL
+);
 """
 
 SEED_ENTRIES = [
@@ -291,6 +297,58 @@ def log_turn(conv_id, turn_id, query, answer, retrieved_ids, escalated=False):
            VALUES (?,?,?,?,?,?,?)""",
         (conv_id, turn_id, query, answer, json.dumps(retrieved_ids),
          int(escalated), time.time()))
+    conn.commit()
+    conn.close()
+
+
+def list_conversation(conv_id: str) -> List[Dict[str, Any]]:
+    """conv_id의 대화 턴 전체를 turn_id 순으로 반환(읽기 전용). 데모 채팅 UI가
+    새로고침 후에도 conversation_log에 이미 쌓인 로그를 그대로 복원해 보여줄 수
+    있게 한다 — log_turn이 매 턴 적재하는 데이터를 그대로 노출만 할 뿐 새 쓰기
+    경로는 아니다."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT turn_id, query, answer, retrieved, escalated, ts
+           FROM conversation_log WHERE conv_id = ? ORDER BY turn_id""",
+        (conv_id,)).fetchall()
+    conn.close()
+    return [
+        {**dict(r), "retrieved": json.loads(r["retrieved"]) if r["retrieved"] else [],
+         "escalated": bool(r["escalated"])}
+        for r in rows
+    ]
+
+
+def list_conversations(limit: int = 50) -> List[Dict[str, Any]]:
+    """대화(conv_id) 단위로 묶어 최근 활동 순으로 반환(읽기 전용). 데모 채팅 UI가
+    "이전 대화" 목록을 보여줄 수 있게 한다 — conv_id별 첫 질문(미리보기)·제목·턴 수·
+    마지막 활동 시각만 집계할 뿐 conversation_log에 새로 쓰지 않는다. title은
+    conversation_meta에 캐시된 값이 있으면 그걸 쓰고(set_conversation_title),
+    없으면(과거 대화 등) 프론트엔드가 first_query로 대체해 표시한다."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT c.conv_id, COUNT(*) AS turn_count, MAX(c.ts) AS last_ts,
+                  (SELECT query FROM conversation_log c2
+                   WHERE c2.conv_id = c.conv_id ORDER BY c2.turn_id LIMIT 1) AS first_query,
+                  m.title AS title
+           FROM conversation_log c
+           LEFT JOIN conversation_meta m ON m.conv_id = c.conv_id
+           GROUP BY c.conv_id
+           ORDER BY last_ts DESC
+           LIMIT ?""",
+        (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_conversation_title(conv_id: str, title: str) -> None:
+    """대화 제목 캐시(최초 1회, demo/app.py가 첫 턴에만 호출). conversation_log
+    행 자체는 건드리지 않는 별도 메타데이터라 채팅 로그 스키마와 독립적이다."""
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO conversation_meta (conv_id, title, created_at) VALUES (?,?,?)
+           ON CONFLICT(conv_id) DO UPDATE SET title = excluded.title""",
+        (conv_id, title, time.time()))
     conn.commit()
     conn.close()
 

@@ -40,6 +40,7 @@ def client(tmp_path, monkeypatch):
     wiki_store.init_db(seed=True)
 
     monkeypatch.setattr(demo_app, "generate", lambda query, hits, model=None: "stub answer")
+    monkeypatch.setattr(demo_app, "generate_title", lambda query, model=None: "stub title")
     monkeypatch.setattr(retrieval, "default_embed_fn", _stub_embed_fn)
     monkeypatch.setattr(retrieval, "default_rerank_fn", _stub_rerank_fn)
 
@@ -64,6 +65,64 @@ def test_chat_returns_answer_and_logs_turn(client):
     conn.close()
     assert row is not None
     assert row["answer"] == "stub answer"
+
+
+def test_history_returns_logged_turns_in_order(client):
+    client.post("/chat", json={
+        "conv_id": "conv-hist", "turn_id": 0, "message": "how do I retry failed requests",
+    })
+    client.post("/chat", json={
+        "conv_id": "conv-hist", "turn_id": 1, "message": "what about rate limiting",
+    })
+
+    resp = client.get("/history/conv-hist")
+    assert resp.status_code == 200
+    turns = resp.json()["turns"]
+    assert [t["turn_id"] for t in turns] == [0, 1]
+    assert turns[0]["query"] == "how do I retry failed requests"
+    assert turns[0]["answer"] == "stub answer"
+    assert isinstance(turns[0]["retrieved"], list) and len(turns[0]["retrieved"]) > 0
+    assert isinstance(turns[0]["retrieved"][0], str)
+
+
+def test_history_unknown_conv_id_returns_empty(client):
+    resp = client.get("/history/does-not-exist")
+    assert resp.status_code == 200
+    assert resp.json() == {"turns": []}
+
+
+def test_conversations_lists_past_conversations_with_preview(client):
+    client.post("/chat", json={
+        "conv_id": "conv-a", "turn_id": 0, "message": "first question in conv-a",
+    })
+    client.post("/chat", json={
+        "conv_id": "conv-b", "turn_id": 0, "message": "first question in conv-b",
+    })
+    client.post("/chat", json={
+        "conv_id": "conv-a", "turn_id": 1, "message": "second question in conv-a",
+    })
+
+    resp = client.get("/conversations")
+    assert resp.status_code == 200
+    convs = {c["conv_id"]: c for c in resp.json()["conversations"]}
+    assert convs["conv-a"]["turn_count"] == 2
+    assert convs["conv-a"]["first_query"] == "first question in conv-a"
+    assert convs["conv-a"]["title"] == "stub title"
+    assert convs["conv-b"]["turn_count"] == 1
+
+
+def test_chat_first_turn_sets_conversation_title(client):
+    client.post("/chat", json={
+        "conv_id": "conv-title", "turn_id": 0, "message": "how do I retry failed requests",
+    })
+
+    conn = wiki_store._conn()
+    row = conn.execute(
+        "SELECT title FROM conversation_meta WHERE conv_id=?", ("conv-title",),
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row["title"] == "stub title"
 
 
 def test_feedback_writes_feedback_row(client):
