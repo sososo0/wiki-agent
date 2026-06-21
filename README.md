@@ -331,6 +331,12 @@ docker run -d --name wiki-agent-demo \
 
 자세한 옵션과 주의사항(볼륨 마운트, DB 경로 일치)은 위 "로컬에서 데모 배포하기" 참고.
 
+> **참고**: 답변 아래 "근거" 줄의 entry_id는 클릭 가능한 링크다. 위키 항목 단건을 보여주는
+> 전용 상세 페이지는 아직 없지만, `/static/graph.html?focus=<entry_id>`로 이동하면 해당
+> entry_id의 노드를 그래프에서 자동으로 선택·포커스하고 우측 패널에 상세 정보(topic/
+> canonical/body_md/provenance 등)를 띄워준다 — 사실상 그래프 뷰가 위키 항목의 "상세
+> 페이지" 역할을 한다.
+
 ### 위키 그래프 시각화
 
 `/static/graph.html`은 위키 엔트리를 라이프사이클 상태별(active/shadow/deprecated/
@@ -363,6 +369,10 @@ WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
 엣지 타입: `pending_update`(shadow 후보 → 교체하려는 active 대상, 승격 대기 중),
 `superseded_by`(deprecated 엔트리 → 과거에 대체했던 대상), `similar`(임베딩 코사인
 유사도 기반, 무방향).
+
+좌측에는 모든 위키 항목을 topic 알파벳순으로 정렬한 검색 가능한 목록이 있다. 항목을
+클릭하면 그래프에서 해당 노드가 선택·포커스되고 우측 상세 패널이 갱신된다 — URL에
+`?focus=<entry_id>`를 붙여 직접 진입해도 동일하게 동작한다(위 "출처 링크화" 참고).
 
 **한계**: `supersedes` 컬럼은 마지막 한 단계만 가리켜서, 승격 이후 `superseded_by`
 엣지로 "이게 무엇을 대체했는지"는 보이지만 v1→v2→v3 같은 다단계 버전 이력 전체를

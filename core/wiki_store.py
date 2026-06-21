@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS wiki_entry (
   status      TEXT DEFAULT 'active',          -- active | shadow | deprecated
   sources     TEXT DEFAULT '[]',
   supersedes  TEXT DEFAULT NULL,    -- 이 엔트리(shadow candidate)가 교체하려는 대상 entry_id
+  tier        TEXT DEFAULT NULL,    -- basics | intermediate | advanced (난이도 분류)
   updated_at  REAL
 );
 
@@ -104,37 +105,52 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS는 기존 테이블에 새 컬럼을 추가해주지 않으므로,
+    이미 데이터가 있는 DB에도 새 컬럼이 생기게 하는 보강 마이그레이션. 컬럼이
+    이미 있으면 아무것도 하지 않는다(여러 번 호출해도 안전)."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(wiki_entry)")}
+    if "tier" not in cols:
+        conn.execute("ALTER TABLE wiki_entry ADD COLUMN tier TEXT DEFAULT NULL")
+
+
 def init_db(seed: bool = True) -> None:
     conn = _conn()
     conn.executescript(SCHEMA)
+    _migrate_schema(conn)
     if seed and conn.execute("SELECT COUNT(*) FROM wiki_entry").fetchone()[0] == 0:
         for eid, topic, canon, body in SEED_ENTRIES:
             add_entry(eid, topic, canon, body, conn=conn, status="active",
-                      provenance="doc_verified")
+                      provenance="doc_verified", tier="basics")
     conn.commit()
     conn.close()
 
 
 def add_entry(entry_id, topic, canonical, body_md, *, conn=None,
               status="shadow", provenance="curated_from_logs",
-              confidence=1.0, sources=None, supersedes=None) -> None:
-    """엔트리 추가/교체. (MCP로는 노출하지 않는다 — 에이전트가 KB에 직접 쓰지 못하게.)"""
+              confidence=1.0, sources=None, supersedes=None, tier=None) -> None:
+    """엔트리 추가/교체. (MCP로는 노출하지 않는다 — 에이전트가 KB에 직접 쓰지 못하게.)
+
+    tier: basics | intermediate | advanced | None(미분류). 호출부(curate.py가
+    문서 파일명 또는 LLM 분류로 결정)가 넘기지 않으면 NULL로 남아 기존 동작과
+    동일 — 이 컬럼이 없던 시절 만들어진 엔트리도 그대로 호환."""
     own = conn is None
     conn = conn or _conn()
     conn.execute(
         """INSERT INTO wiki_entry
            (entry_id, topic, canonical, body_md, provenance, confidence,
-            status, sources, supersedes, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+            status, sources, supersedes, tier, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(entry_id) DO UPDATE SET
              topic=excluded.topic, canonical=excluded.canonical,
              body_md=excluded.body_md, provenance=excluded.provenance,
              confidence=excluded.confidence, status=excluded.status,
              sources=excluded.sources, supersedes=excluded.supersedes,
+             tier=excluded.tier,
              version=wiki_entry.version+1,
              updated_at=excluded.updated_at""",
         (entry_id, topic, canonical, body_md, provenance, confidence,
-         status, json.dumps(sources or []), supersedes, time.time()))
+         status, json.dumps(sources or []), supersedes, tier, time.time()))
     conn.execute("DELETE FROM wiki_fts WHERE entry_id=?", (entry_id,))
     conn.execute(
         "INSERT INTO wiki_fts (entry_id, topic, canonical, body_md) VALUES (?,?,?,?)",
@@ -159,7 +175,7 @@ def list_active_entries() -> List[Dict[str, Any]]:
     conn = _conn()
     rows = conn.execute(
         """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
-                  version, sources
+                  version, sources, tier
            FROM wiki_entry WHERE status = 'active'""").fetchall()
     conn.close()
     return [
@@ -183,12 +199,21 @@ def _bm25_rank(query: str, limit: int) -> List[str]:
     return [r["entry_id"] for r in rows]
 
 
-def search_wiki(query: str, k: int = 5) -> List[Dict[str, Any]]:
-    """BM25 + dense + RRF + rerank 하이브리드 검색 후 결과를 반환하고 retrieval_log에 적재."""
+def search_wiki(query: str, k: int = 5, *, cache: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    """BM25 + dense + RRF + rerank 하이브리드 검색 후 결과를 반환하고 retrieval_log에 적재.
+
+    cache를 안 주면(기본값) 매 호출 새 dict로 항상 전체 재인코딩 — 기존 동작/테스트와
+    동일(서로 다른 embed_fn을 쓰는 테스트들이 같은 entry_id+version을 캐시 충돌
+    없이 공유할 수 있어야 함). 오래 사는 프로세스(데모 서버 등)는 자신이 들고 있는
+    dict를 넘겨 코퍼스가 커져도 매 쿼리 재인코딩 비용이 늘지 않게 한다(core/retrieval.py
+    hybrid_search의 cache 인자, core/graph.py와 동일 패턴)."""
     fetch_k = max(k * 4, 20)
     bm25_ids = _bm25_rank(query, fetch_k)
     entries = list_active_entries()
-    results = retrieval.hybrid_search(query, entries, bm25_ids, k=k, fetch_k=fetch_k)
+    results = retrieval.hybrid_search(
+        query, entries, bm25_ids, k=k, fetch_k=fetch_k,
+        cache=cache if cache is not None else {},
+    )
 
     conn = _conn()
     conn.execute(
@@ -224,7 +249,7 @@ def list_shadow_entries() -> List[Dict[str, Any]]:
     conn = _conn()
     rows = conn.execute(
         """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
-                  version, sources, supersedes
+                  version, sources, supersedes, tier
            FROM wiki_entry WHERE status = 'shadow'""").fetchall()
     conn.close()
     return [
@@ -241,7 +266,7 @@ def list_rejected_entries() -> List[Dict[str, Any]]:
     conn = _conn()
     rows = conn.execute(
         """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
-                  version, sources, supersedes
+                  version, sources, supersedes, tier
            FROM wiki_entry WHERE status = 'rejected'""").fetchall()
     conn.close()
     return [
@@ -258,7 +283,7 @@ def list_deprecated_entries() -> List[Dict[str, Any]]:
     conn = _conn()
     rows = conn.execute(
         """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
-                  version, sources, supersedes
+                  version, sources, supersedes, tier
            FROM wiki_entry WHERE status = 'deprecated'""").fetchall()
     conn.close()
     return [

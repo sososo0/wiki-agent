@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>wiki-agent</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <style>
   :root { --accent: #2563eb; --bg: #f7f7f8; --border: #e5e7eb; }
   * { box-sizing: border-box; }
@@ -54,15 +56,50 @@
   #intro h2 { font-size: 15px; margin: 0 0 8px; }
   #intro p { font-size: 13px; line-height: 1.6; color: #374151; margin: 0 0 10px; }
   #intro ul { font-size: 13px; line-height: 1.6; color: #374151; margin: 0; padding-left: 18px; }
+  #intro .topics { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+  #intro .topics span {
+    font-size: 12px; color: #1e40af; background: #eff6ff; border: 1px solid #dbeafe;
+    border-radius: 999px; padding: 3px 10px;
+  }
+  .examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .examples button {
+    border: 1px solid var(--border); background: #f8fafc; color: #374151;
+    border-radius: 999px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+  }
+  .examples button:hover { background: #eff6ff; border-color: #bfdbfe; color: var(--accent); }
 
   #log { display: flex; flex-direction: column; gap: 12px; }
-  .msg { padding: 10px 14px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; line-height: 1.5; }
-  .msg.user { align-self: flex-end; background: var(--accent); color: white; }
+  .msg { padding: 10px 14px; border-radius: 12px; max-width: 85%; line-height: 1.5; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: white; white-space: pre-wrap; }
   .msg.bot { align-self: flex-start; background: #fff; border: 1px solid var(--border); color: #111; }
+  .msg.bot .md > :first-child { margin-top: 0; }
+  .msg.bot .md > :last-child { margin-bottom: 0; }
+  .msg.bot .md p { margin: 0 0 8px; }
+  .msg.bot .md h1, .msg.bot .md h2, .msg.bot .md h3 { font-size: 14px; margin: 12px 0 6px; }
+  .msg.bot .md ul, .msg.bot .md ol { margin: 0 0 8px; padding-left: 20px; }
+  .msg.bot .md code { background: #f1f5f9; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+  .msg.bot .md pre { background: #f1f5f9; border-radius: 8px; padding: 10px; overflow-x: auto; }
+  .msg.bot .md pre code { background: none; padding: 0; }
+  .msg.bot .md a { color: var(--accent); }
+  .msg.bot .md blockquote { margin: 0 0 8px; padding-left: 10px; border-left: 3px solid var(--border); color: #64748b; }
   .sources { font-size: 12px; color: #64748b; margin-top: 6px; }
+  .sources a { color: var(--accent); text-decoration: none; }
+  .sources a:hover { text-decoration: underline; }
   .feedback { margin-top: 4px; }
   .feedback button { border: none; background: none; cursor: pointer; font-size: 15px; opacity: 0.4; }
   .feedback button:hover { opacity: 1; }
+
+  .typing-dots { display: inline-flex; gap: 4px; padding: 4px 2px; }
+  .typing-dots span {
+    width: 6px; height: 6px; border-radius: 50%; background: #94a3b8;
+    animation: typing-bounce 1.2s infinite ease-in-out;
+  }
+  .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
 
   form#chat-form {
     display: flex; justify-content: center; padding: 14px 20px; background: #fff; border-top: 1px solid var(--border);
@@ -90,7 +127,7 @@
       <span class="logo">🪶</span>
       <div>
         <h1>wiki-agent</h1>
-        <p>자가 갱신형 위키 기반 RAG 어시스턴트</p>
+        <p>API/백엔드 요청 신뢰성 패턴 위키 어시스턴트</p>
       </div>
     </div>
     <div class="header-actions">
@@ -105,21 +142,35 @@
       <div id="intro">
         <h2>이 에이전트는 무엇인가요?</h2>
         <p>
-          이 에이전트는 사내 위키(지식베이스)에서 질문과 관련된 항목을 검색하고,
-          검색된 내용만 근거로 답변합니다. 답변에 쓰인 위키 항목은 매 턴 기록되고,
-          사용자가 남기는 👍/👎 피드백은 위키를 더 정확하게 자동으로 갱신하는 데
-          쓰입니다(AI가 직접 위키를 고치는 게 아니라, 안전장치를 통과한 후보만
-          반영됩니다).
+          이 에이전트는 <strong>API/백엔드 요청 신뢰성 패턴</strong>을 주로 다루는
+          위키(지식베이스)에서 질문과 관련된 항목을 검색하고, 검색된 내용만 근거로
+          답변합니다. 답변에 쓰인 위키 항목은 매 턴 기록되고, 사용자가 남기는
+          👍/👎 피드백은 위키를 더 정확하게 자동으로 갱신하는 데 쓰입니다(AI가
+          직접 위키를 고치는 게 아니라, 안전장치를 통과한 후보만 반영됩니다).
         </p>
+        <div class="topics">
+          <span>재시도/백오프</span><span>레이트 리미팅</span><span>서킷 브레이커</span>
+          <span>커넥션 풀링</span><span>멱등성</span><span>타임아웃 전략</span>
+          <span>벌크헤드 격리</span><span>백프레셔</span>
+        </div>
         <h2 style="margin-top:14px">사용 방법</h2>
         <ul>
-          <li>알고 싶은 내용을 자연어 질문으로 입력하세요.</li>
+          <li>알고 싶은 내용을 자연어 질문으로 입력하세요(위 영역 밖의 질문은
+            모른다고 답할 수 있습니다).</li>
           <li>답변 아래 "근거"에 실제로 참고한 위키 항목 ID가 표시됩니다.</li>
           <li>답변이 만족스러우면 👍, 아니면 👎를 눌러주세요 — 이 피드백이 위키
             개선에 직접 쓰입니다.</li>
           <li>위키 항목들이 어떻게 연결되어 있는지 보고 싶다면 아래 "그래프 보기"를
             확인하세요.</li>
         </ul>
+        <div class="examples">
+          <button type="button" data-q="exponential backoff와 jitter는 왜 같이 써야 해?">재시도는 어떻게?</button>
+          <button type="button" data-q="hedged request가 뭐고 언제 써야 해?">hedged request란?</button>
+          <button type="button" data-q="connection pool에 idle timeout을 두는 이유가 뭐야?">idle timeout 설정</button>
+          <button type="button" data-q="leaky bucket과 token bucket 알고리즘의 차이가 뭐야?">레이트리밋 알고리즘 비교</button>
+          <button type="button" data-q="토큰 버킷의 capacity는 어떻게 정해야 해?">토큰 버킷 sizing</button>
+          <button type="button" data-q="connect timeout이 뭐야?">connect timeout이란?</button>
+        </div>
       </div>
       <div id="log"></div>
     </div>
@@ -127,7 +178,7 @@
 
   <form id="chat-form">
     <div class="inner">
-      <input id="input" type="text" placeholder="질문을 입력하세요..." autocomplete="off" required>
+      <input id="input" type="text" placeholder="예: 재시도 시 지수 백오프와 jitter는 어떻게 적용해?" autocomplete="off" required>
       <button type="submit">보내기</button>
     </div>
   </form>
@@ -164,13 +215,78 @@
     return div;
   }
 
-  function addBotMessage(answer, retrieved, turn) {
-    const div = addMessage("bot", answer);
+  function renderMarkdown(text) {
+    const html = marked.parse(text, { breaks: true });
+    return DOMPurify.sanitize(html);
+  }
 
+  function addTypingIndicator() {
+    hideIntro();
+    const div = document.createElement("div");
+    div.className = "msg bot";
+    div.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+    log.appendChild(div);
+    div.scrollIntoView({ block: "end" });
+    return div;
+  }
+
+  // 백엔드는 답변을 한 번에 반환하지만(스트리밍 API 없음), 받은 텍스트를
+  // 일정 글자 수씩 끊어 점진적으로 다시 렌더링해 타이핑되는 듯한 효과를 낸다.
+  // 매 단계마다 누적된 markdown 전체를 다시 파싱하므로 태그가 중간에 끊겨
+  // 깨지는 일이 없다.
+  function revealProgressively(mdEl, fullText, onDone) {
+    const steps = 40;
+    const chunkSize = Math.max(4, Math.ceil(fullText.length / steps));
+    let i = 0;
+    function tick() {
+      i = Math.min(fullText.length, i + chunkSize);
+      mdEl.innerHTML = renderMarkdown(fullText.slice(0, i));
+      mdEl.scrollIntoView({ block: "end" });
+      if (i < fullText.length) {
+        setTimeout(tick, 20);
+      } else if (onDone) {
+        onDone();
+      }
+    }
+    tick();
+  }
+
+  function addBotMessage(answer, retrieved, turn, { progressive = false } = {}) {
+    hideIntro();
+    const div = document.createElement("div");
+    div.className = "msg bot";
+    const md = document.createElement("div");
+    md.className = "md";
+    div.appendChild(md);
+    log.appendChild(div);
+    div.scrollIntoView({ block: "end" });
+
+    const finishRest = () => appendBotMessageFooter(div, retrieved, turn);
+    if (progressive) {
+      revealProgressively(md, answer, finishRest);
+    } else {
+      md.innerHTML = renderMarkdown(answer);
+      finishRest();
+    }
+    return div;
+  }
+
+  function appendBotMessageFooter(div, retrieved, turn) {
     if (retrieved && retrieved.length) {
       const src = document.createElement("div");
       src.className = "sources";
-      src.textContent = "근거: " + retrieved.map(h => h.entry_id).join(", ");
+      src.append("근거: ");
+      retrieved.forEach((h, i) => {
+        if (i > 0) src.append(", ");
+        const a = document.createElement("a");
+        // 그래프 뷰가 ?focus=entry_id를 받으면 해당 노드를 선택/포커스하므로
+        // entry_id 텍스트가 실질적인 "출처 링크" 역할을 한다(전용 상세 페이지는
+        // 없음 — README 참고).
+        a.href = `/static/graph.html?focus=${encodeURIComponent(h.entry_id)}`;
+        a.target = "_blank";
+        a.textContent = h.entry_id;
+        src.appendChild(a);
+      });
       div.appendChild(src);
     }
 
@@ -224,6 +340,13 @@
   }
 
   document.getElementById("new-chat").addEventListener("click", startNewConversation);
+
+  document.querySelectorAll(".examples button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      input.value = btn.dataset.q;
+      form.requestSubmit();
+    });
+  });
 
   const historyToggle = document.getElementById("history-toggle");
   const historyPanel = document.getElementById("history-panel");
@@ -288,6 +411,7 @@
 
     addMessage("user", message);
     const turn = turnId++;
+    const typingEl = addTypingIndicator();
 
     const resp = await fetch("/chat", {
       method: "POST",
@@ -295,7 +419,8 @@
       body: JSON.stringify({ conv_id: convId, turn_id: turn, message }),
     });
     const data = await resp.json();
-    addBotMessage(data.answer, data.retrieved, turn);
+    typingEl.remove();
+    addBotMessage(data.answer, data.retrieved, turn, { progressive: true });
   });
 
   if (!convId) {

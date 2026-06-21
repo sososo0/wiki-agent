@@ -39,7 +39,10 @@ def client(tmp_path, monkeypatch):
     wiki_store.DB_PATH = db_path
     wiki_store.init_db(seed=True)
 
-    monkeypatch.setattr(demo_app, "generate", lambda query, hits, model=None: "stub answer")
+    monkeypatch.setattr(
+        demo_app, "generate",
+        lambda query, hits, model=None, hint="general": {"answer": "stub answer", "entry_ids_used": []},
+    )
     monkeypatch.setattr(demo_app, "generate_title", lambda query, model=None: "stub title")
     monkeypatch.setattr(retrieval, "default_embed_fn", _stub_embed_fn)
     monkeypatch.setattr(retrieval, "default_rerank_fn", _stub_rerank_fn)
