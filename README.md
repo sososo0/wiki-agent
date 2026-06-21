@@ -34,7 +34,7 @@ core/
     └── promote.py       shadow 후보를 시뮬레이션 평가 후 회귀 없을 때만 active 승격
 eval/
 ├── run_eval.py          recall@k/mrr/correctness 평가 하니스
-├── gold_set.jsonl       20문항 골드셋(동결)
+├── gold_set.jsonl       58문항 골드셋(53개 답변 가능 + 5개 의도적 unanswerable)
 └── baseline.json        기준 점수(명시적 --save-baseline 없이는 보존)
 serving/
 └── mcp_server.py        MCP stdio 서버 (search_wiki, submit_feedback만 노출)
@@ -110,9 +110,11 @@ docker run -d --name wiki-agent-demo \
    쓰는 파일과 다른 경로를 쓰면 사이클이 빈 로그를 보고 `mined gaps: 0`.
    - A(uvicorn)로 띄웠다면 `$DB` = `/tmp/demo.db`
    - B(Docker)로 띄웠다면 `$DB` = `/tmp/wiki-agent-docker-data/wiki_agent.db`
-1. 데모 채팅(A 또는 B)에서, **현재 위키 5개 주제(재시도, rate limiting, connection
-   pooling, circuit breaker, idempotency)와 무관한** 질문 하나를 골라 **정확히 같은
-   문구로 3번 이상** 전송(복사-붙여넣기로, 패러프레이즈 금지). 예:
+1. 데모 채팅(A 또는 B)에서, **현재 위키 8개 주제(재시도, rate limiting, connection
+   pooling, circuit breaker, idempotency, timeout, backpressure, bulkhead isolation —
+   각 주제마다 basics/intermediate/advanced 난이도별로 갈라져 active 엔트리만 400개
+   이상)와 무관한** 질문 하나를 골라 **정확히 같은 문구로 3번 이상** 전송(복사-붙여넣기로,
+   패러프레이즈 금지). 예:
    `"How do I implement pagination for a large dataset?"`
 2. 채팅에 쓴 것과 **같은** `$DB`로 갱신 사이클 1회 실행:
    ```bash
@@ -132,10 +134,25 @@ docker run -d --name wiki-agent-demo \
 
 **참고 — `promoted`는 실행마다 바뀔 수 있음.** `promote`가 비교하는 `correctness`
 지표는 매 실행마다 실제 LLM 호출(`generate` + judge)로 채점하는 비결정적 지표라서,
-같은 후보를 같은 사이클로 다시 돌려도 `correctness`가 ±1문항(골드셋 20문항 기준
-0.05) 정도 흔들릴 수 있음. `recall@k`/`mrr`는 결정적이므로 그쪽이 변하면 진짜
+같은 후보를 같은 사이클로 다시 돌려도 `correctness`가 ±1문항(골드셋 58문항 기준
+약 0.02) 정도 흔들릴 수 있음. `recall@k`/`mrr`는 결정적이므로 그쪽이 변하면 진짜
 회귀, `correctness`만 바뀌었다면 노이즈일 가능성이 높음 — 회귀 차단 자체는
 설계대로 보수적으로 동작하는 것이라 승격 실패 ≠ 사이클 실패.
+
+**주의 — 이 절차를 반복 실행하면 골드셋의 unanswerable 문항이 오염될 수 있음.**
+`eval/run_eval.py`(또는 `--qualitative` 등)를 자주 돌리면 그 평가 질문들도
+`search_wiki` 호출을 거치면서 `retrieval_log`에 그대로 쌓인다. 골드셋의 5개
+unanswerable 문항(KB에 정답이 없는 질문)이 **정확히 같은 문구로 3번 이상**
+쌓이면, `mine_gaps`가 이를 진짜 gap으로 오인해 `curate`가 LLM 자기 지식만으로
+그럴듯한(하지만 검증되지 않은) 답을 만들어낼 수 있다 — 실제로 이 프로젝트에서
+한 번 발생했고, `promote_if_better`가 `escalation_correctness`(1.0→0.0) 하락을
+정확히 잡아내 active 승격을 막아냈다(안전장치가 설계대로 동작한 사례). 이후
+`run_update_cycle.py`에 마이닝 윈도우(`--window-days`, 기본 14일)와 거부된 gap
+기억(`skipped_rejected_gaps`)을 추가해 — 한 번 게이트가 거부한 질문은 같은 사이클
+내내 다시 LLM을 호출하지 않고, 윈도우 밖(14일 이상 지난) 오래된 오염도 자연히
+빠진다(아래 "피드백 파이프라인 1사이클" 참고). 다만 윈도우 안에서 처음 오염되는
+경우 자체는 막지 못하므로, 평가를 자주 돌렸다면 갱신 사이클 실행 전에
+`retrieval_log`를 점검하는 습관은 여전히 권장.
 
 **한계 — 외부 검색을 하지 않는다.** `mine`이 찾은 gap을 `curate.py`가 위키 엔트리
 초안으로 만들 때, LLM은 그 gap의 질문 원문만 보고 **자기 학습 지식으로** 초안을
@@ -192,11 +209,13 @@ shadow→eval→promote 경로를 탐).
 | 검색 품질 평가 | `python eval/run_eval.py [--k 5] [--save-baseline] [--qualitative]` |
 | 에이전틱 태스크 평가(진단용) | `python eval/agentic_eval.py [--max-turns 4]` |
 | MCP 서버(stdio) | `python serving/mcp_server.py` |
-| 피드백 파이프라인 1사이클 | `python scripts/run_update_cycle.py [--gold path] [--k 5]` |
+| 피드백 파이프라인 1사이클 | `python scripts/run_update_cycle.py [--gold path] [--k 5] [--window-days 14]` |
 | 문서 ingestion 파이프라인 | `python scripts/ingest_doc.py <path...> [--daily-cap N] [--min-sources 1]` |
 | 데모 웹앱(채팅) | `WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload` |
 | 위키 그래프 시각화 | 데모 실행 후 브라우저에서 `/static/graph.html` 접속 (`GET /graph`로 원본 JSON 확인 가능) |
 | 데모 Docker 빌드/실행 | `docker build -t wiki-agent-demo .` 후 `docker run ...` |
+| 갱신 사이클 알림 확인 | 데모 실행 후 헤더의 🔔 아이콘 클릭 (`GET /notifications`로 원본 JSON 확인 가능) |
+| 사이클 자동 실행 상태 확인 | `hermes cron status` / `hermes cron list` (설정은 [docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md) Step 6) |
 
 ### 서빙 로직 검증
 
@@ -296,7 +315,7 @@ python serving/mcp_server.py
 ### 피드백 파이프라인 1사이클
 
 ```bash
-WIKI_AGENT_DB=/tmp/demo.db python scripts/run_update_cycle.py
+WIKI_AGENT_DB=/tmp/demo.db python scripts/run_update_cycle.py [--window-days 14]
 ```
 
 `retrieval_log`/`feedback`을 마이닝→큐레이션→게이트→shadow 반영→평가 기반 승격까지
@@ -304,6 +323,7 @@ WIKI_AGENT_DB=/tmp/demo.db python scripts/run_update_cycle.py
 
 ```
 mined gaps: 2
+skipped (already-rejected gaps): []
 feedback: {'n': 10, 'down': 9, 'down_rate': 0.9}
 daily_cap: 5
 shadow written: ['wiki_gap_how_do_i_implement_pagination_for_a_larg_24eafc5c']
@@ -315,6 +335,23 @@ promote: promoted=True activated=['wiki_gap_how_do_i_implement_pagination_for_a_
 
 `WIKI_AGENT_DB`는 채팅에서 쓴 DB와 **반드시 같은 파일**을 가리켜야 함 — 직접 새 gap을
 만들어 이 출력을 재현해보는 절차는 위 "위키 자가 갱신 확인하기" 참고.
+
+`retrieval_log`/`feedback`에는 retention 정책이 없어 테이블이 무한히 쌓이는데, 두
+가지 장치로 그 비용을 억제한다:
+
+- **마이닝 윈도우(`--window-days`, 기본 14일)** — `mine_gaps`가 보는 로그를 최근
+  N일로 제한한다. 안 그러면 매 사이클이 점점 커지는 전체 히스토리를 다시 스캔하고,
+  오래전에 우연히 오염된 쿼리(예: 평가를 반복 실행해 골드셋의 unanswerable 문항이
+  retrieval_log에 3번 이상 쌓인 경우 — 위 "주의" 콜아웃 참고)가 영원히 gap으로
+  재탐지된다. `--window-days 0`을 주면 전체 히스토리를 보는 이전 동작으로 되돌릴 수
+  있다.
+- **거부된 gap 기억(`skipped_rejected_gaps`)** — 게이트가 한 번 거부한 gap은
+  `status="rejected"` 마커(`wiki_gap_..._rej`, `core/pipeline/curate.rejected_gap_entry_id`)로
+  기억해, 같은 질문이 윈도우 안에서 다시 마이닝돼도 curate/judge LLM 호출을 반복하지
+  않는다(문서 ingestion의 `dedupe.py` skip_rejected와 동일한 목적 — 문서는
+  `chunk_hash`로, 여긴 `norm_query`로 "콘텐츠 불변"을 판단). 따로 만료시키지 않아도
+  되는 이유: 나중에 진짜 답이 될 콘텐츠가 생기면(문서 ingestion 등) 검색 점수가
+  양수로 돌아서 `mine_gaps` 자체가 더는 그 질문을 gap으로 뽑지 않는다.
 
 ### 문서 ingestion 파이프라인
 
@@ -433,6 +470,45 @@ opencode의 Question System(실행 스레드를 `Deferred`로 블로킹하고 `r
 > canonical/body_md/provenance 등)를 띄워준다 — 사실상 그래프 뷰가 위키 항목의 "상세
 > 페이지" 역할을 한다.
 
+### 갱신 사이클 알림(🔔)
+
+`scripts/run_update_cycle.py`는 이제 Hermes cron으로 매일 새벽 2시 자동 실행되는데
+([docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md) Step 6), 로그 파일에만
+결과가 남으면 아무도 안 보면 그냥 지나간다. 그래서 사이클이 끝날 때마다
+`run_cycle()`이 이미 들고 있는 구조화된 결과 dict(mined/feedback/shadow_written/
+promote)에서 **직접**(로그 텍스트를 나중에 파싱하지 않고) 알림을 0~2건 만들어
+`notifications` 테이블에 적재한다(`summary_notifications()`):
+
+| 레벨 | 발생 조건 | 예시 |
+|---|---|---|
+| `info` | 매 사이클 항상 1건 | "gap 2개 발견, shadow 1개 반영, 승격됨(1개 active)" |
+| `warning` | 최근 피드백 5건 이상 & 👎 비율 > 50% | "피드백 부정 비율이 높음 — daily_cap이 보수적으로 낮춰짐" |
+| `warning` | shadow가 새로 생겼는데 승격은 안 됨(회귀 감지) | "회귀로 승격 차단됨 — shadow 1개가 active로 못 감" |
+| `error` | 사이클 자체가 예외로 죽음 | 예외 메시지 그대로(그대로 재raise도 함 — hermes cron 실패 상태 보존) |
+
+이 테이블에 쓰는 건 오직 `run_update_cycle.py`(신뢰된 오프라인 스크립트)뿐이고
+KB(`wiki_entry`)와는 무관해 "에이전트는 KB에 직접 못 씀" HARD CONSTRAINT와도
+충돌하지 않는다. 데모는 읽기/읽음처리만 노출:
+
+- `GET /notifications` → `{"notifications": [...], "unread_count": N}`
+- `POST /notifications/{id}/read`
+
+헤더의 🔔 아이콘이 안 읽은 개수를 빨간 배지로 보여주고, 클릭하면 최신순 드롭다운이
+열린다(레벨별 색 점 + 제목 + 메시지 + 시간). 60초 간격 `setInterval` 폴링으로
+배지를 갱신(SSE/웹소켓 없이 데모 규모에 맞는 단순한 방식). 직접 알림을 만들어
+확인하려면:
+
+```bash
+WIKI_AGENT_DB=/tmp/demo.db python3 -c "
+from core import wiki_store
+wiki_store.add_notification('warning', '테스트 알림', '확인용 메시지')
+"
+```
+
+**한계**: 사이클 1회 단위 요약만 보여줄 뿐, 여러 사이클에 걸친 누적 추이(예: eval
+점수가 시간이 지나며 개선되는지)는 보여주지 않는다 — 위 "현재 상태 → 구현 예정"의
+"여러 사이클에 걸친 효과 증명" 참고.
+
 ### 위키 그래프 시각화
 
 `/static/graph.html`은 위키 엔트리를 라이프사이클 상태별(active/shadow/deprecated/
@@ -498,14 +574,19 @@ WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
 **완료**
 
 - **데이터/서빙 레이어** — SQLite+FTS5 지식 저장소, MCP 서버(`search_wiki`/`submit_feedback`),
-  검색·대화·피드백 로깅까지 동작. (`core/wiki_store.py`, `serving/mcp_server.py`)
-- **평가 하니스** — 골드셋 20문항 기준 recall@k/mrr/correctness를 계산하고, 기존
-  `eval/baseline.json`과 before/after로 비교. 모든 변경은 이 숫자로 검증. 골드셋에
-  KB가 답을 모르는 unanswerable 문항 5개도 포함해, "모를 때 모른다고 하는가"를
-  escalation_correctness로 별도 측정. (`eval/`)
+  검색·대화·피드백 로깅까지 동작. MCP 서버는 `demo/app.py`와 동일하게 entry_id+version
+  키 임베딩 캐시(`_search_embed_cache`)를 모듈 전역으로 들고 다녀, 에이전트가
+  검색할 때마다 활성 엔트리 전체(400여 개)를 재인코딩하지 않는다. (`core/wiki_store.py`,
+  `serving/mcp_server.py`)
+- **평가 하니스** — 골드셋 58문항(53개 답변 가능 + 5개 의도적 unanswerable) 기준
+  recall@k/mrr/correctness를 계산하고, 기존 `eval/baseline.json`과 before/after로
+  비교. 모든 변경은 이 숫자로 검증. unanswerable 문항으로 "모를 때 모른다고 하는가"를
+  escalation_correctness로 별도 측정 — 최근 측정값(`eval/baseline.json`, k=5):
+  recall@k 0.98 / mrr 0.78 / correctness 0.89 / escalation_correctness 1.0. (`eval/`)
 - **하이브리드 검색** — 기존 BM25 키워드 검색에 dense 임베딩 + RRF 융합 +
-  cross-encoder rerank를 추가. 골드셋 기준 mrr 0.935→0.975, correctness 0.35→0.40으로
-  개선(recall@5는 이미 1.0으로 천장). (`core/retrieval.py`)
+  cross-encoder rerank를 추가. 도입 당시 20문항 골드셋 기준 mrr 0.935→0.975,
+  correctness 0.35→0.40으로 개선(당시 recall@5는 이미 1.0으로 천장 — 이후 코퍼스가
+  seed 5개 → active 400여 개로 늘면서 현재 recall@k는 위 0.98 수준). (`core/retrieval.py`)
 - **피드백 파이프라인(1사이클)** — `retrieval_log`/`feedback` 로그에서 검색이
   약한 주제를 찾아(mine) LLM으로 위키 엔트리 초안을 만들고(curate), 오염 게이트를
   통과한 것만 `shadow` 상태로 반영. 평가 회귀가 없을 때만 `active`로 승격,
@@ -528,24 +609,40 @@ WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
   Question System 참고), 👎 피드백은 짧은 이유 후보와 함께 저장한다. 비용
   부담 때문에 일일/대화당 LLM 호출 횟수에 하드 캡을 둠(`demo/` "API 호출
   횟수 제한" 참고). (`demo/`, `Dockerfile`)
+- **갱신 사이클 자동 실행(Hermes cron)** — `scripts/run_update_cycle.py`를 사람이
+  수동으로 실행하는 대신, Hermes cron(`hermes cron create "0 2 * * *" --no-agent`)으로
+  매일 새벽 2시 자동 실행. `--no-agent` 스크립트 job에는 (config.yaml에 노출되지
+  않는) 하드코딩된 120초 타임아웃이 있어, 골드셋이 커진 지금은 평가 단계만으로도
+  넘기기 쉽다 — 실제 작업은 백그라운드로 던지고 래퍼는 즉시 종료하는 방식으로
+  우회했고, `hermes cron run`으로 직접 트리거해 끝까지 도는 것까지 확인. 이 검증
+  과정에서 반복 평가 실행이 골드셋의 unanswerable 문항을 `retrieval_log`에 오염시켜
+  `mine_gaps`가 가짜 gap으로 오인하고 `curate`가 그럴듯한 오답을 만든 사례가 실제로
+  발생했는데, `promote_if_better`가 골드셋 회귀(escalation_correctness 1.0→0.0)로
+  정확히 막아내는 것까지 실증됨 — 자동화돼도 게이트/회귀 차단은 코드 변경 없이 그대로
+  적용된다(에이전트는 여전히 KB에 직접 못 쓰고, 별도의 신뢰된 프로세스가 스케줄러로
+  도는 구조 그대로). 설정 절차는 [docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md)
+  Step 6 참고. (저장소 밖 호스트 설정: `~/.hermes/scripts/wiki_agent_update_cycle.sh`)
+- **갱신 사이클 알림(🔔)** — 자동 실행되는 사이클을 아무도 안 보면 그냥 지나가는
+  문제를 보완. `run_cycle()`이 이미 들고 있는 구조화된 summary(mined/feedback/
+  shadow_written/promote)에서 **로그 텍스트를 나중에 파싱하지 않고 그 자리에서
+  직접** 알림 0~2건을 판정해 `notifications` 테이블에 기록 — 사이클 요약 1건(info)은
+  항상, 피드백 부정 비율 급증이나 회귀로 인한 승격 차단 시 경고(warning)가 추가되고,
+  사이클 자체가 예외로 죽으면 에러(error)로 남되 그대로 재raise한다(hermes cron 실패
+  상태도 보존). 데모는 `GET /notifications`/`POST /notifications/{id}/read`로
+  읽기/읽음처리만 노출하고(쓰기는 오직 `run_update_cycle.py`), 헤더의 🔔 아이콘이
+  안 읽은 개수를 배지로 보여주며 60초 폴링으로 갱신한다. (`core/wiki_store.py`,
+  `scripts/run_update_cycle.py`, `demo/`)
 
 **구현 예정**
 
-- **Hermes 에이전트 기반 사이클 자동화** — 지금은 `run_update_cycle.py`를 사람이
-  수동으로 1회 실행하는 것까지만 구현. 다음 단계는 Hermes 에이전트가 이
-  오케스트레이션을 직접 맡는 것 — `hermes cron add --schedule "0 2 * * *" --cmd
-  "python scripts/run_update_cycle.py"`로 주기 실행을 등록하고, 사이클 stdout
-  요약(mined/shadow/rejected/promote 결과)을 에이전트가 파싱해 이상 신호(예:
-  `down_rate` 급증, 연속 `promoted=False`) 감지 시 사람에게 알리는 흐름까지
-  확장 예정. RAG 서빙은 이미 [docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md)로
-  Hermes에 MCP 도구로 연결되어 있어, 자동화도 같은 Hermes 위에 자연스럽게
-  추가 가능 — 단, 에이전트에게는 여전히 읽기 도구(`search_wiki`)만 노출하고
-  쓰기(`add_entry` 등)는 비노출이라는 HARD CONSTRAINT 유지.
 - **공개 환경에서의 안전한 자가 갱신** — 자가 갱신 파이프라인 자체는 동작하지만,
   공개 데모에 그대로 연결하면 누구나 위키를 흔들 수 있음. shadow로 쌓아두고
   사람이 승인해야 active로 가는 승인 워크플로 추가 예정.
 - **멀티유저화** — 데모는 지금 단일 프로세스·단일 SQLite 파일로 동작.
-  Postgres 전환, rate limiting, 시크릿 분리(vault 등) 계획 중.
-- **여러 사이클에 걸친 효과 증명** — 1회 실행 동작만 확인. Hermes로 사이클이
-  자동 반복되면, 사이클별 eval 점수 추이와 승격/거부 통계를 누적해 위키가
-  실제로 좋아지는지 보여주는 대시보드/기록 추가 예정.
+  IP/대화 기준 rate limiting은 이미 적용됐지만(위 "악의적/봇 트래픽 방어" 참고),
+  Postgres 전환·`/conversations`·`/history` 인증(`owner_token`)·시크릿 분리(vault 등)는
+  계획 중.
+- **여러 사이클에 걸친 효과 증명** — Hermes cron으로 사이클은 이제 매일 자동
+  반복되지만, 사이클별 eval 점수 추이와 승격/거부 통계를 누적해 위키가 실제로
+  좋아지는지 보여주는 대시보드/기록은 아직 없음(현재 알림은 사이클 1회 단위 요약만
+  보여줄 뿐 누적 추이는 아님) — 추가 예정.

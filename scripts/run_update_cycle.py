@@ -74,6 +74,7 @@ def run_cycle(
     k: int = 5,
     min_freq: int = 3,
     score_threshold: float = 0.0,
+    window_days: Optional[float] = 14,
     llm_fn: Optional[Callable] = None,
     judge_fn: Optional[Callable] = None,
     evaluate_fn: Optional[Callable] = None,
@@ -82,13 +83,30 @@ def run_cycle(
 
     evaluate_fn = evaluate_fn or evaluate
 
-    feedback_agg = ingest.ingest_feedback(wiki_store.list_feedback())
-    ingested_retrieval = ingest.ingest_retrieval_log(wiki_store.list_retrieval_log())
+    # window_days=None(또는 0)이면 기존 동작과 동일하게 전체 히스토리를 본다.
+    # 기본은 14일 — retrieval_log/feedback에 retention이 없어 테이블이 무한히
+    # 쌓이는데, 윈도잉이 없으면 매 사이클이 점점 커지는 전체 히스토리를 다시
+    # 스캔하고, 한 번 우연히 오염된(예: 평가 질문이 3번 반복된) 쿼리가 영원히
+    # gap으로 재탐지된다 — 실제로 골드셋 unanswerable 문항이 이렇게 재탐지된
+    # 사례가 있었다(README "위키 자가 갱신 확인하기" 참고).
+    mining_since_ts = time.time() - window_days * 86400 if window_days else None
+
+    feedback_agg = ingest.ingest_feedback(wiki_store.list_feedback(since_ts=mining_since_ts))
+    ingested_retrieval = ingest.ingest_retrieval_log(
+        wiki_store.list_retrieval_log(since_ts=mining_since_ts))
     gaps = mine.mine_gaps(ingested_retrieval, min_freq=min_freq, score_threshold=score_threshold)
 
     daily_cap = _daily_cap_from_feedback(feedback_agg["down_rate"])
     existing_entries = wiki_store.list_active_entries()
     since_ts = time.time() - 86400
+
+    # norm_query 단위로 "이전에 게이트가 거부한 gap"을 기억해 같은 질문이 다음
+    # 사이클에 다시 mine_gaps에 잡혀도 curate/judge LLM 호출을 반복하지 않는다
+    # (core/pipeline/dedupe.py의 skip_rejected와 동일한 목적 — 문서 ingestion은
+    # chunk_hash로, 여긴 norm_query로 "콘텐츠 불변"을 판단). 진짜 답이 될 콘텐츠가
+    # 나중에 생기면(문서 ingestion 등) 검색 점수가 양수로 돌아서 mine_gaps 자체가
+    # 더는 이 질문을 gap으로 뽑지 않으므로, 이 기억은 따로 만료시킬 필요가 없다.
+    rejected_gap_ids = {e["entry_id"] for e in wiki_store.list_rejected_entries()}
 
     summary: Dict[str, Any] = {
         "mined": len(gaps),
@@ -96,10 +114,16 @@ def run_cycle(
         "daily_cap": daily_cap,
         "shadow_written": [],
         "rejected": [],
+        "skipped_rejected_gaps": [],
         "promote": None,
     }
 
     for gap in gaps:
+        rej_id = curate.rejected_gap_entry_id(gap["norm_query"])
+        if rej_id in rejected_gap_ids:
+            summary["skipped_rejected_gaps"].append(gap["norm_query"])
+            continue
+
         try:
             patch = curate.curate(gap, llm_fn=llm_fn)
         except Exception as e:
@@ -115,6 +139,12 @@ def run_cycle(
         )
         if not ok:
             summary["rejected"].append({"entry_id": patch["entry_id"], "reason": reason})
+            wiki_store.add_entry(
+                rej_id, patch["topic"], patch["canonical"], patch["body_md"],
+                status="rejected", provenance=patch["provenance"], confidence=0.0,
+                sources=patch["sources"], tier=patch.get("tier"),
+            )
+            rejected_gap_ids.add(rej_id)
             continue
 
         wiki_store.add_entry(
@@ -143,11 +173,15 @@ def main():
     parser = argparse.ArgumentParser(description="피드백 파이프라인 1사이클 실행")
     parser.add_argument("--gold", default=None)
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument(
+        "--window-days", type=float, default=14,
+        help="mine_gaps가 보는 retrieval_log/feedback 윈도우(일). 0이면 전체 히스토리(과거 동작)")
     args = parser.parse_args()
+    window_days = args.window_days or None
 
     wiki_store.init_db(seed=True)
     try:
-        result = run_cycle(gold_path=args.gold, k=args.k)
+        result = run_cycle(gold_path=args.gold, k=args.k, window_days=window_days)
     except Exception as e:
         # 사이클이 죽어도 종모양 알림으로 보여야 한다 — hermes cron 로그만 보는
         # 사람은 거의 없으니 데모 UI에도 남긴다. 삼키지 않고 그대로 재raise해
@@ -156,6 +190,7 @@ def main():
         raise
 
     print(f"mined gaps: {result['mined']}")
+    print(f"skipped (already-rejected gaps): {result['skipped_rejected_gaps']}")
     print(f"feedback: {result['feedback']}")
     print(f"daily_cap: {result['daily_cap']}")
     print(f"shadow written: {result['shadow_written']}")
