@@ -27,15 +27,27 @@ def _anthropic_client():
     return _client
 
 
+VALID_TIERS = ("basics", "intermediate", "advanced")
+
+
 def default_llm_fn(query_examples, model=CURATE_MODEL) -> Dict[str, str]:
-    """실제 Anthropic 호출로 {"topic", "canonical", "body_md"} JSON을 생성."""
+    """실제 Anthropic 호출로 {"topic", "canonical", "body_md", "tier"} JSON을 생성.
+
+    tier는 문서 ingestion처럼 파일명에서 추론할 신호가 없는 로그 마이닝 경로의
+    유일한 분류 수단이라, LLM이 질문의 성격을 보고 직접 분류하게 한다(curate()가
+    유효하지 않은 값은 advanced로 폴백)."""
     prompt = (
         "Users repeatedly asked questions that our knowledge base could not "
         "answer well. Based ONLY on the question text below (no other "
         "knowledge), draft a short wiki entry that would help answer them. "
         "Keep body_md under 80 words, plain prose, no markdown code fences "
-        "inside it. Reply with JSON only, no other text: "
-        '{"topic": "...", "canonical": "one sentence summary", "body_md": "..."}\n\n'
+        "inside it. Also classify the difficulty tier of the question: "
+        "\"basics\" (asking for a basic definition), \"intermediate\" "
+        "(asking how to apply/configure something in practice), or "
+        "\"advanced\" (asking about deep internals or edge cases). "
+        "Reply with JSON only, no other text: "
+        '{"topic": "...", "canonical": "one sentence summary", "body_md": "...", '
+        '"tier": "basics|intermediate|advanced"}\n\n'
         "Questions:\n" + "\n".join(f"- {q}" for q in query_examples)
     )
     resp = _anthropic_client().messages.create(
@@ -77,6 +89,13 @@ def curate(
     digest = hashlib.sha1(gap["norm_query"].encode("utf-8")).hexdigest()[:8]
     entry_id = f"wiki_gap_{slug}_{digest}"
 
+    # LLM이 tier를 빼먹거나 오타를 내도(예: "Advanced") 파이프라인이 멈추지 않게
+    # 유효한 3개 값 중 하나가 아니면 advanced로 폴백 — 실제 운영 중 반복된
+    # 구체적 질문이라는 gap의 특성상 advanced가 가장 안전한 기본값.
+    tier = drafted.get("tier")
+    if tier not in VALID_TIERS:
+        tier = "advanced"
+
     return {
         "op": "create",
         "entry_id": entry_id,
@@ -85,6 +104,7 @@ def curate(
         "body_md": drafted.get("body_md", ""),
         "provenance": "curated_from_logs",
         "confidence": 0.5,
+        "tier": tier,
         "sources": [
             {"type": "retrieval_log_query", "query": q, "verified": False}
             for q in gap.get("query_occurrences", gap["query_examples"])
@@ -117,6 +137,18 @@ def default_doc_llm_fn(heading_path, text, model=CURATE_MODEL) -> Dict[str, str]
     )
     text_out = next((b.text for b in resp.content if b.type == "text"), "")
     return json.loads(_extract_json_object(text_out))
+
+
+def infer_doc_tier(doc_path: str) -> str:
+    """문서 ingestion 경로는 scripts/generate_corpus.py가 정한 파일명 접두사로
+    난이도를 결정적으로 알 수 있다(basics_/intermediate_, 그 외는 advanced) —
+    로그 마이닝 경로(curate())처럼 LLM 분류가 필요 없다."""
+    fname = doc_path.rsplit("/", 1)[-1]
+    if fname.startswith("basics_"):
+        return "basics"
+    if fname.startswith("intermediate_"):
+        return "intermediate"
+    return "advanced"
 
 
 def doc_chunk_entry_id(candidate: Dict[str, Any]) -> str:
@@ -157,6 +189,7 @@ def curate_doc_chunk(
         "body_md": drafted.get("body_md", ""),
         "provenance": "doc_verified",
         "confidence": 0.9,
+        "tier": infer_doc_tier(candidate["doc_path"]),
         "sources": [{
             "type": "document",
             "path": candidate["doc_path"],

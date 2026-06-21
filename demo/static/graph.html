@@ -34,6 +34,22 @@
   #panel .field { margin-bottom: 10px; }
   #panel .field b { display: block; color: #64748b; font-size: 12px; text-transform: uppercase; }
   #empty-hint { color: #94a3b8; }
+
+  #entry-list-wrap {
+    width: 260px; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column;
+  }
+  #entry-list-search {
+    border: none; border-bottom: 1px solid #e2e8f0; padding: 10px 14px; font-size: 13px; outline: none;
+  }
+  #entry-list { flex: 1; overflow-y: auto; }
+  #entry-list button {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 8px 14px; font-size: 13px; color: #1f2937;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  #entry-list button:hover { background: #f1f5f9; }
+  #entry-list button.active { background: #eff6ff; color: #2563eb; font-weight: 600; }
+  #entry-list .entry-id { display: block; font-size: 11px; color: #94a3b8; }
 </style>
 </head>
 <body>
@@ -67,6 +83,10 @@
   </div>
 </div>
 <div id="wrap">
+  <div id="entry-list-wrap">
+    <input id="entry-list-search" type="text" placeholder="🔍 위키 항목 검색...">
+    <div id="entry-list"></div>
+  </div>
   <div id="network"></div>
   <div id="panel"><p id="empty-hint">노드를 클릭하면 상세 정보가 표시됩니다.</p></div>
 </div>
@@ -130,6 +150,37 @@
     infoToggle.textContent = hidden ? "ℹ️ 설명 숨기기" : "ℹ️ 설명 보기";
   });
 
+  function buildEntryList(nodes, onSelect) {
+    const listEl = document.getElementById("entry-list");
+    const searchEl = document.getElementById("entry-list-search");
+    const sorted = [...nodes].sort((a, b) =>
+      (a.topic || a.id).localeCompare(b.topic || b.id));
+
+    function render(filter) {
+      listEl.innerHTML = "";
+      const q = (filter || "").toLowerCase();
+      for (const n of sorted) {
+        const label = n.topic || n.id;
+        if (q && !label.toLowerCase().includes(q) && !n.id.toLowerCase().includes(q)) continue;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.dataset.id = n.id;
+        btn.innerHTML = `${label}<span class="entry-id">${n.id}</span>`;
+        btn.addEventListener("click", () => onSelect(n.id));
+        listEl.appendChild(btn);
+      }
+    }
+
+    searchEl.addEventListener("input", () => render(searchEl.value));
+    render("");
+  }
+
+  function setActiveListItem(id) {
+    document.querySelectorAll("#entry-list button").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.id === id);
+    });
+  }
+
   async function main() {
     const resp = await fetch("/graph");
     const data = await resp.json();
@@ -151,11 +202,32 @@
       }
     );
 
+    function focusNode(id) {
+      if (!nodes.get(id)) return;
+      network.selectNodes([id]);
+      network.focus(id, { scale: 1.2, animation: { duration: 400, easingFunction: "easeInOutQuad" } });
+      renderDetail(nodes.get(id).raw);
+      setActiveListItem(id);
+    }
+
     network.on("click", (params) => {
       if (!params.nodes.length) return;
-      const node = nodes.get(params.nodes[0]);
-      renderDetail(node.raw);
+      renderDetail(nodes.get(params.nodes[0]).raw);
+      setActiveListItem(params.nodes[0]);
     });
+
+    // 알파벳순(topic 기준) 위키 목록 — 클릭하면 그래프에서 해당 노드가 선택/포커스됨.
+    buildEntryList(data.nodes, focusNode);
+
+    // index.html의 "근거" 링크(/static/graph.html?focus=entry_id)로 들어오면
+    // 해당 노드를 자동으로 선택/포커스해 보여준다 — 이게 출처 "링크화"의 실체.
+    const focusId = new URLSearchParams(location.search).get("focus");
+    if (focusId) {
+      // 안정화(stabilization) 이벤트명에 의존하지 않고, 초기 레이아웃이 자리잡을
+      // 정도의 짧은 지연 후 포커스한다(레이아웃 전에 focus()를 호출하면 좌표가
+      // 아직 확정되지 않아 카메라 이동이 부정확할 수 있음).
+      setTimeout(() => focusNode(focusId), 300);
+    }
   }
 
   main();

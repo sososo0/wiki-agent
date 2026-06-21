@@ -19,7 +19,15 @@ import pytest
 
 from eval.run_eval import evaluate, load_gold, GOLD_PATH
 
+# 골드셋이 참조할 수 있는 entry_id 네임스페이스: 시드(wiki_000N) +
+# 파이프라인이 실제로 생성하는 두 접두사(core/pipeline/curate.py의
+# wiki_gap_/wiki_doc_) — 오타·존재하지 않는 id 참조를 막기 위한 가드.
 SEED_IDS = {f"wiki_000{i}" for i in range(1, 6)}
+KNOWN_ID_PREFIXES = ("wiki_gap_", "wiki_doc_")
+
+
+def _is_known_gold_id(entry_id: str) -> bool:
+    return entry_id in SEED_IDS or entry_id.startswith(KNOWN_ID_PREFIXES)
 
 
 def fake_retriever(rows):
@@ -63,17 +71,17 @@ def test_evaluate_correctness_uses_judge_fn():
 
 def test_gold_set_schema():
     gold = load_gold(GOLD_PATH)
-    assert len(gold) == 25
+    assert len(gold) == 58
     answerable = [ex for ex in gold if not ex.get("unanswerable")]
     unanswerable = [ex for ex in gold if ex.get("unanswerable")]
-    assert len(answerable) == 20
+    assert len(answerable) == 53
     assert len(unanswerable) == 5
 
     for ex in answerable:
         assert set(ex) >= {"q", "gold_entry_ids", "must_contain", "gold_answer"}
         assert isinstance(ex["q"], str) and ex["q"]
         assert isinstance(ex["gold_entry_ids"], list) and ex["gold_entry_ids"]
-        assert set(ex["gold_entry_ids"]) <= SEED_IDS
+        assert all(_is_known_gold_id(eid) for eid in ex["gold_entry_ids"])
         assert isinstance(ex["must_contain"], list) and ex["must_contain"]
         assert isinstance(ex["gold_answer"], str) and ex["gold_answer"]
 

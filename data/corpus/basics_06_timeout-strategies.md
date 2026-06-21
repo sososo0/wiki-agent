@@ -1,0 +1,29 @@
+# Timeout Strategies
+
+## What Is a Connect Timeout?
+
+A connect timeout is the maximum time your application will wait to establish a network connection to another service before giving up. When you initiate a request to a remote server, your system first needs to complete a TCP handshake—this timeout prevents your code from hanging indefinitely if that server is unreachable or slow to respond to connection attempts. This matters because if a downstream service is down or network connectivity is broken, you want to fail fast rather than having your request threads pile up waiting for a connection that will never complete. Think of it like calling a restaurant: the connect timeout is how long you're willing to wait for someone to pick up the phone before you hang up and try calling elsewhere.
+
+## What Is a Read Timeout?
+
+A read timeout is the maximum time your application will wait to receive a response from a service after the connection is already established. Once your code successfully connects to another service and sends a request, the read timeout clock starts—it limits how long you'll wait for that service to send back data. This prevents your application from blocking indefinitely on a service that accepted your request but then stopped responding (either due to processing delays, bugs, or resource exhaustion). Without read timeouts, slow or stuck services can consume all your available request handlers. Imagine you're waiting for a pizza place to tell you your order status after the call connects: the read timeout is how long you'll hold the line listening before hanging up.
+
+## What Is a Total Timeout?
+
+A total timeout is the maximum duration allowed for an entire operation from start to finish, regardless of where that time is spent. Unlike connect and read timeouts which measure specific phases, a total timeout measures the whole request lifecycle—connection setup, sending data, waiting for a response, and reading the complete response. This is useful because sometimes you care less about where the delay happens and more about the overall user impact. If you tell a client "your request will complete in 5 seconds or error," a total timeout directly enforces that guarantee. Picture ordering something online: instead of separate timeouts for page load and checkout, you might set one total timeout saying "complete my entire purchase within 30 seconds."
+
+## Why Do We Need Timeout Budgets Across Call Chains?
+
+A timeout budget is the practice of dividing your available time among multiple service calls in a request chain, rather than giving each call the same full timeout. When your service calls Service A, which calls Service B, which calls Service C, you have a limited amount of time before your original client times out—that total time is your budget, and you must split it across all three calls. This matters because if each service independently uses a long timeout, the cumulative delays stack up and you'll exceed your overall deadline anyway. Without budgeting, you might allocate 10 seconds per service but only have 20 seconds total before your client gives up, making the last service call pointless. Think of it like a relay race: you have 2 minutes total to complete all legs, so you can't let the first runner take 90 seconds.
+
+## What Are Hedged Requests and When Do We Use Them?
+
+A hedged request is when your application sends duplicate requests to different replicas or servers, and uses whichever response comes back first. Rather than waiting for one slow server, you immediately try multiple servers in parallel and discard the slower responses once you have an answer. This strategy trades some extra network traffic and server load for dramatically lower tail latencies—instead of occasionally waiting 5 seconds for one slow server, you might wait 1 second by racing two servers against each other. Hedging is most useful when you have multiple identical copies of data (replicas) and you care more about speed than minimizing extra work. It's like ordering from two nearby pizza places simultaneously and taking whoever delivers first.
+
+## What Are Common Timeout Tuning Pitfalls?
+
+Common mistakes when setting timeouts include making them too short (causing cascading failures and false negatives when systems are slow but working), making them too long (defeating the purpose and letting slow services pile up requests), treating all calls the same (when some operations are naturally faster than others), and ignoring deployment differences (a timeout tuned for low-latency internal networks might fail across geographic regions). It's tempting to set timeouts conservatively high to avoid false failures, but this creates its own problems by allowing request queues to grow and amplifying problems downstream. The right timeout depends on measuring real behavior of your services and understanding what latency your users can tolerate. Avoid the mistake of setting timeouts once and never revisiting them as your system evolves.
+
+## How Do Timeouts Interact With Retries?
+
+Timeouts and retries are closely connected: when a timeout fires, you often retry the request, but the retry itself needs its own timeout or you risk compounding the delay problem. If your timeout is 5 seconds and you retry 3 times, you could wait up to 15 seconds total—potentially longer than your client's patience. This interaction matters because aggressive retries on timeout can actually make problems worse by sending more load to an already struggling service. A better approach is to consider your timeout-plus-retry behavior as a single unit: include retry time in your budget, reduce retry counts when timeouts are short, or use exponential backoff to spread retries out over time. Think of it like calling a busy restaurant: calling back immediately three times in a row doesn't help anyone, but spacing out your retries and having an overall time limit does.

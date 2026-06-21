@@ -52,6 +52,7 @@ def _merge_active_and_shadow() -> Tuple[List[Dict[str, Any]], List[str], List[Di
             "confidence": s.get("confidence", 1.0),
             "provenance": s.get("provenance"),
             "sources": s.get("sources"),
+            "tier": s.get("tier"),
         }
         activated_ids.append(target_id)
     return list(merged.values()), activated_ids, shadow
@@ -134,6 +135,7 @@ def promote_if_better(
             target_id, s["topic"], s["canonical"], s.get("body_md"),
             status="active", provenance=s.get("provenance"),
             confidence=s.get("confidence", 1.0), sources=s.get("sources"),
+            tier=s.get("tier"),
         )
         if s.get("supersedes"):
             wiki_store.set_entry_status(s["entry_id"], "deprecated")

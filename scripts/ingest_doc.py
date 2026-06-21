@@ -152,6 +152,7 @@ def run_doc_ingest(
                 rej_id, patch["topic"], patch["canonical"], patch["body_md"],
                 status="rejected", provenance=patch["provenance"], confidence=0.0,
                 sources=[{**patch["sources"][0], "verified": False, "rejected_reason": reason}],
+                tier=patch.get("tier"),
             )
             existing_by_id[rej_id] = {"status": "rejected", "version": 1, "sources": [
                 {"chunk_hash": cand["chunk_hash"]}
@@ -162,7 +163,7 @@ def run_doc_ingest(
             patch["entry_id"], patch["topic"], patch["canonical"], patch["body_md"],
             status="shadow", provenance=patch["provenance"],
             confidence=patch["confidence"], sources=patch["sources"],
-            supersedes=patch.get("supersedes"),
+            supersedes=patch.get("supersedes"), tier=patch.get("tier"),
         )
         summary["shadow_written"].append(patch["entry_id"])
         existing_by_id[patch["entry_id"]] = {

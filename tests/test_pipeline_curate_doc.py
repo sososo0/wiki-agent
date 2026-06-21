@@ -72,6 +72,22 @@ def test_curate_doc_chunk_propagates_llm_fn_errors():
         curate.curate_doc_chunk(CANDIDATE, llm_fn=_broken_llm_fn)
 
 
+def test_infer_doc_tier_from_filename_prefix():
+    assert curate.infer_doc_tier("data/corpus/basics_01_retry-strategies.md") == "basics"
+    assert curate.infer_doc_tier("data/corpus/intermediate_06_timeout-strategies.md") == "intermediate"
+    assert curate.infer_doc_tier("data/corpus/01_retry-strategies.md") == "advanced"
+    assert curate.infer_doc_tier("docs/retry.md") == "advanced"
+
+
+def test_curate_doc_chunk_sets_tier_from_doc_path():
+    patch = curate.curate_doc_chunk(CANDIDATE, llm_fn=_stub_doc_llm_fn)
+    assert patch["tier"] == "advanced"  # CANDIDATE doc_path는 basics_/intermediate_ 접두사가 없음
+
+    basics_candidate = {**CANDIDATE, "doc_path": "data/corpus/basics_01_retry-strategies.md"}
+    patch2 = curate.curate_doc_chunk(basics_candidate, llm_fn=_stub_doc_llm_fn)
+    assert patch2["tier"] == "basics"
+
+
 def test_make_doc_judge_fn_passes_real_chunk_text_not_source_dict(monkeypatch):
     """gate.default_judge_fn은 sources에 "query"가 없는 문서 출처를 dict 그대로
     stringify해 judge에 넘긴다(실제 본문을 못 봄) — make_doc_judge_fn은 entry_id로
