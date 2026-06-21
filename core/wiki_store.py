@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS conversation_log (
 );
 
 CREATE TABLE IF NOT EXISTS feedback (
-  conv_id TEXT, turn_id INTEGER, thumb TEXT, ts REAL
+  conv_id TEXT, turn_id INTEGER, thumb TEXT, reason TEXT DEFAULT NULL, ts REAL
 );
 
 -- 대화별 표시용 제목(첫 턴에 1회 생성). conversation_log의 원본 질문/답변과는
@@ -112,6 +112,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(wiki_entry)")}
     if "tier" not in cols:
         conn.execute("ALTER TABLE wiki_entry ADD COLUMN tier TEXT DEFAULT NULL")
+    feedback_cols = {row["name"] for row in conn.execute("PRAGMA table_info(feedback)")}
+    if "reason" not in feedback_cols:
+        conn.execute("ALTER TABLE feedback ADD COLUMN reason TEXT DEFAULT NULL")
 
 
 def init_db(seed: bool = True) -> None:
@@ -239,7 +242,7 @@ def list_feedback() -> List[Dict[str, Any]]:
     """feedback 전체를 반환 (피드백 파이프라인의 집계 신호 입력)."""
     conn = _conn()
     rows = conn.execute(
-        "SELECT conv_id, turn_id, thumb, ts FROM feedback").fetchall()
+        "SELECT conv_id, turn_id, thumb, reason, ts FROM feedback").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -378,10 +381,13 @@ def set_conversation_title(conv_id: str, title: str) -> None:
     conn.close()
 
 
-def submit_feedback(conv_id, turn_id, thumb):
+def submit_feedback(conv_id, turn_id, thumb, reason=None):
+    """reason: 👎일 때 데모 UI가 고정 후보(예: "근거 부족") 중 고른 짧은 이유.
+    LLM 호출 없이 정적 후보를 그대로 저장만 한다 — 비용 없는 신호 보강."""
     conn = _conn()
-    conn.execute("INSERT INTO feedback (conv_id, turn_id, thumb, ts) VALUES (?,?,?,?)",
-                 (conv_id, turn_id, thumb, time.time()))
+    conn.execute(
+        "INSERT INTO feedback (conv_id, turn_id, thumb, reason, ts) VALUES (?,?,?,?,?)",
+        (conv_id, turn_id, thumb, reason, time.time()))
     conn.commit()
     conn.close()
 
