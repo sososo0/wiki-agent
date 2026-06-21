@@ -213,11 +213,45 @@ def build_basics_prompt(category_name: str, guide: str, n: int) -> str:
     )
 
 
+def build_intermediate_prompt(category_name: str, guide: str, n: int) -> str:
+    """basics(기초 정의)와 advanced(심화 레퍼런스) 사이의 중간 난이도. 독자는 해당
+    개념을 한 번쯔음 써본 엔지니어로, 정의는 이미 알고 실무에서 어떻게
+    선택/구성하는지를 궁금해한다(build_basics_prompt/build_prompt와 별도 프롬프트
+    — 기존 두 출력에 영향 없음)."""
+    return (
+        f"You are writing intermediate-level reference material for an internal "
+        f"engineering wiki about distributed systems and backend reliability. The "
+        f"reader already knows the basic definition and has used this kind of "
+        f"pattern before, but wants practical guidance on choosing between "
+        f"variants and configuring them correctly. Write {n} distinct intermediate "
+        f"subtopics under the category \"{category_name}\".\n\n"
+        f"Topics to draw subtopics from (cover a good spread, don't repeat): {guide}\n\n"
+        "Format strictly as markdown:\n"
+        f"# {category_name}\n\n"
+        "## <subtopic title, phrased as a practical how-to/when-to question, "
+        "e.g. \"When Should You Use X Over Y?\" or \"How Do You Configure X?\">\n"
+        "<100-180 word explanation that assumes basic familiarity and focuses on "
+        "practical decision-making: a brief reminder of the mechanism (1 sentence), "
+        "concrete guidance on when/how to apply it, and one common pitfall or "
+        "tradeoff to watch for. No deep internals or exhaustive edge-case analysis "
+        "(that belongs in advanced material) and no beginner-level basics "
+        "explanations. No hallucinated statistics or fake case studies. No "
+        "marketing language.>\n\n"
+        "(repeat ## sections for each subtopic)\n\n"
+        "Output ONLY the markdown, no preamble or commentary."
+    )
+
+
+_PROMPT_BUILDERS = {
+    "basics": build_basics_prompt,
+    "intermediate": build_intermediate_prompt,
+    "advanced": build_prompt,
+}
+
+
 def generate_category(slug: str, category_name: str, guide: str, n: int, model: str,
                        difficulty: str = "advanced") -> str:
-    prompt = (build_basics_prompt if difficulty == "basics" else build_prompt)(
-        category_name, guide, n
-    )
+    prompt = _PROMPT_BUILDERS[difficulty](category_name, guide, n)
     resp = _client().messages.create(
         model=model,
         max_tokens=4096,
@@ -234,9 +268,12 @@ def main():
     parser.add_argument("--model", default=GEN_MODEL)
     parser.add_argument("--only", nargs="*", default=None,
                          help="지정 시 해당 slug만 생성(재시도/보충용)")
-    parser.add_argument("--difficulty", choices=["advanced", "basics"], default="advanced",
-                         help="basics: 초급/중급 학습자용 짧은 정의문 생성(파일명에 "
-                              "basics_ 접두사 붙어 advanced 출력과 분리됨)")
+    parser.add_argument("--difficulty", choices=["advanced", "basics", "intermediate"],
+                         default="advanced",
+                         help="basics: 초급 학습자용 짧은 정의문. intermediate: 기본 정의는 "
+                              "안다고 가정하고 실무 선택/구성 가이드. advanced: 심화 레퍼런스. "
+                              "basics/intermediate는 파일명에 각각 basics_/intermediate_ "
+                              "접두사가 붙어 advanced 출력과 분리됨")
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -247,7 +284,7 @@ def main():
         only = set(args.only)
         categories = [c for c in CATEGORIES if c[0] in only]
 
-    prefix = "basics_" if args.difficulty == "basics" else ""
+    prefix = f"{args.difficulty}_" if args.difficulty in ("basics", "intermediate") else ""
     for i, (slug, name, guide) in enumerate(categories, start=1):
         out_path = out_dir / f"{prefix}{i:02d}_{slug}.md"
         if out_path.exists():

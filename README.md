@@ -331,6 +331,10 @@ docker run -d --name wiki-agent-demo \
 
 자세한 옵션과 주의사항(볼륨 마운트, DB 경로 일치)은 위 "로컬에서 데모 배포하기" 참고.
 
+> **참고**: 답변 아래 "근거" 줄에 표시되는 entry_id는 현재 일반 텍스트일 뿐 클릭 가능한
+> 링크는 아니다. 위키 항목 단건을 보여주는 상세 페이지/엔드포인트가 아직 없어서다 —
+> 추후 `/static/graph.html`처럼 entry_id로 바로 이동하는 뷰가 추가되면 그때 링크화한다.
+
 ### 위키 그래프 시각화
 
 `/static/graph.html`은 위키 엔트리를 라이프사이클 상태별(active/shadow/deprecated/

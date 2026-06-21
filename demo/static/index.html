@@ -87,6 +87,18 @@
   .feedback button { border: none; background: none; cursor: pointer; font-size: 15px; opacity: 0.4; }
   .feedback button:hover { opacity: 1; }
 
+  .typing-dots { display: inline-flex; gap: 4px; padding: 4px 2px; }
+  .typing-dots span {
+    width: 6px; height: 6px; border-radius: 50%; background: #94a3b8;
+    animation: typing-bounce 1.2s infinite ease-in-out;
+  }
+  .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+
   form#chat-form {
     display: flex; justify-content: center; padding: 14px 20px; background: #fff; border-top: 1px solid var(--border);
   }
@@ -154,6 +166,8 @@
           <button type="button" data-q="hedged request가 뭐고 언제 써야 해?">hedged request란?</button>
           <button type="button" data-q="멀티테넌트 시스템에서 한 테넌트가 DB 커넥션을 다 써버리는 걸 막으려면 어떻게 해야 해?">테넌트 리소스 격리</button>
           <button type="button" data-q="시스템이 과부하일 때 모든 요청을 큐에 쌓는 것보다 일부를 거부하는 게 나을까?">과부하 시 로드 셰딩</button>
+          <button type="button" data-q="토큰 버킷의 capacity는 어떻게 정해야 해?">토큰 버킷 sizing</button>
+          <button type="button" data-q="connect timeout과 read timeout의 차이가 뭐야?">timeout 종류 비교</button>
         </div>
       </div>
       <div id="log"></div>
@@ -204,17 +218,58 @@
     return DOMPurify.sanitize(html);
   }
 
-  function addBotMessage(answer, retrieved, turn) {
+  function addTypingIndicator() {
+    hideIntro();
+    const div = document.createElement("div");
+    div.className = "msg bot";
+    div.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+    log.appendChild(div);
+    div.scrollIntoView({ block: "end" });
+    return div;
+  }
+
+  // 백엔드는 답변을 한 번에 반환하지만(스트리밍 API 없음), 받은 텍스트를
+  // 일정 글자 수씩 끊어 점진적으로 다시 렌더링해 타이핑되는 듯한 효과를 낸다.
+  // 매 단계마다 누적된 markdown 전체를 다시 파싱하므로 태그가 중간에 끊겨
+  // 깨지는 일이 없다.
+  function revealProgressively(mdEl, fullText, onDone) {
+    const steps = 40;
+    const chunkSize = Math.max(4, Math.ceil(fullText.length / steps));
+    let i = 0;
+    function tick() {
+      i = Math.min(fullText.length, i + chunkSize);
+      mdEl.innerHTML = renderMarkdown(fullText.slice(0, i));
+      mdEl.scrollIntoView({ block: "end" });
+      if (i < fullText.length) {
+        setTimeout(tick, 20);
+      } else if (onDone) {
+        onDone();
+      }
+    }
+    tick();
+  }
+
+  function addBotMessage(answer, retrieved, turn, { progressive = false } = {}) {
     hideIntro();
     const div = document.createElement("div");
     div.className = "msg bot";
     const md = document.createElement("div");
     md.className = "md";
-    md.innerHTML = renderMarkdown(answer);
     div.appendChild(md);
     log.appendChild(div);
     div.scrollIntoView({ block: "end" });
 
+    const finishRest = () => appendBotMessageFooter(div, retrieved, turn);
+    if (progressive) {
+      revealProgressively(md, answer, finishRest);
+    } else {
+      md.innerHTML = renderMarkdown(answer);
+      finishRest();
+    }
+    return div;
+  }
+
+  function appendBotMessageFooter(div, retrieved, turn) {
     if (retrieved && retrieved.length) {
       const src = document.createElement("div");
       src.className = "sources";
@@ -343,6 +398,7 @@
 
     addMessage("user", message);
     const turn = turnId++;
+    const typingEl = addTypingIndicator();
 
     const resp = await fetch("/chat", {
       method: "POST",
@@ -350,7 +406,8 @@
       body: JSON.stringify({ conv_id: convId, turn_id: turn, message }),
     });
     const data = await resp.json();
-    addBotMessage(data.answer, data.retrieved, turn);
+    typingEl.remove();
+    addBotMessage(data.answer, data.retrieved, turn, { progressive: true });
   });
 
   if (!convId) {

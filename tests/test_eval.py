@@ -71,10 +71,10 @@ def test_evaluate_correctness_uses_judge_fn():
 
 def test_gold_set_schema():
     gold = load_gold(GOLD_PATH)
-    assert len(gold) == 42
+    assert len(gold) == 58
     answerable = [ex for ex in gold if not ex.get("unanswerable")]
     unanswerable = [ex for ex in gold if ex.get("unanswerable")]
-    assert len(answerable) == 37
+    assert len(answerable) == 53
     assert len(unanswerable) == 5
 
     for ex in answerable:
