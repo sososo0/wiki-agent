@@ -21,11 +21,11 @@
   .brand h1 { font-size: 16px; margin: 0; }
   .brand p { font-size: 12px; margin: 0; color: #64748b; }
   .header-actions { display: flex; gap: 8px; position: relative; }
-  #new-chat, #history-toggle {
+  #new-chat, #history-toggle, #notif-toggle {
     border: 1px solid var(--border); background: #fff; border-radius: 8px;
     padding: 6px 12px; font-size: 13px; cursor: pointer; color: #374151;
   }
-  #new-chat:hover, #history-toggle:hover { background: #f1f5f9; }
+  #new-chat:hover, #history-toggle:hover, #notif-toggle:hover { background: #f1f5f9; }
 
   #history-panel {
     display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 10;
@@ -43,6 +43,36 @@
   .history-item.active { background: #eff6ff; }
   .history-item .preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .history-item .meta { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+
+  #notif-toggle { position: relative; }
+  #notif-badge {
+    position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px;
+    background: #ef4444; color: #fff; border-radius: 999px; font-size: 10px;
+    line-height: 16px; text-align: center; padding: 0 3px; display: none;
+  }
+  #notif-badge.show { display: block; }
+  #notif-panel {
+    display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 10;
+    width: 340px; max-height: 420px; overflow-y: auto;
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08); padding: 6px;
+  }
+  #notif-panel.open { display: block; }
+  #notif-panel .empty { padding: 14px; font-size: 13px; color: #94a3b8; text-align: center; }
+  .notif-item {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 10px; border-radius: 8px; font-size: 13px; color: #1f2937;
+  }
+  .notif-item:hover { background: #f1f5f9; }
+  .notif-item.unread { background: #eff6ff; }
+  .notif-item .row { display: flex; align-items: center; gap: 6px; }
+  .notif-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .notif-item .dot.info { background: #2563eb; }
+  .notif-item .dot.warning { background: #f59e0b; }
+  .notif-item .dot.error { background: #ef4444; }
+  .notif-item .title { font-weight: 600; }
+  .notif-item .message { margin: 4px 0 0; color: #374151; line-height: 1.4; }
+  .notif-item .meta { font-size: 11px; color: #94a3b8; margin-top: 4px; }
 
   main {
     flex: 1; min-height: 0; overflow-y: auto;
@@ -153,8 +183,10 @@
       </div>
     </div>
     <div class="header-actions">
+      <button id="notif-toggle" type="button">🔔<span id="notif-badge"></span></button>
       <button id="history-toggle" type="button">🕘 이전 대화</button>
       <button id="new-chat" type="button">+ 새 대화</button>
+      <div id="notif-panel"></div>
       <div id="history-panel"></div>
     </div>
   </header>
@@ -460,6 +492,82 @@
       closeHistoryPanel();
     }
   });
+
+  // 갱신 사이클(scripts/run_update_cycle.py) 결과를 보여주는 종모양 알림 —
+  // 데모는 쓰기 도구가 없으므로(notifications 테이블은 그 오프라인 스크립트만
+  // 씀) 여기는 순수 읽기/읽음처리만 한다. 60초 폴링으로 배지를 갱신한다(SSE/
+  // 웹소켓 없이 데모 규모에 맞는 단순한 방식).
+  const notifToggle = document.getElementById("notif-toggle");
+  const notifPanel = document.getElementById("notif-panel");
+  const notifBadge = document.getElementById("notif-badge");
+
+  function closeNotifPanel() {
+    notifPanel.classList.remove("open");
+  }
+
+  async function refreshNotifBadge() {
+    try {
+      const resp = await fetch("/notifications");
+      const data = await resp.json();
+      if (data.unread_count > 0) {
+        notifBadge.textContent = data.unread_count > 99 ? "99+" : data.unread_count;
+        notifBadge.classList.add("show");
+      } else {
+        notifBadge.classList.remove("show");
+      }
+      return data.notifications || [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function openNotifPanel() {
+    notifPanel.classList.add("open");
+    notifPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
+    const items = await refreshNotifBadge();
+
+    if (!items.length) {
+      notifPanel.innerHTML = '<div class="empty">알림이 없습니다.</div>';
+      return;
+    }
+
+    notifPanel.innerHTML = "";
+    for (const n of items) {
+      const btn = document.createElement("button");
+      btn.className = "notif-item" + (n.read ? "" : " unread");
+      btn.innerHTML = `
+        <div class="row"><span class="dot ${n.level}"></span><span class="title">${n.title}</span></div>
+        <div class="message">${n.message}</div>
+        <div class="meta">${fmtTime(n.created_at)}</div>
+      `;
+      btn.addEventListener("click", async () => {
+        if (!n.read) {
+          await fetch(`/notifications/${n.id}/read`, { method: "POST" });
+          btn.classList.remove("unread");
+          n.read = 1;
+          refreshNotifBadge();
+        }
+      });
+      notifPanel.appendChild(btn);
+    }
+  }
+
+  notifToggle.addEventListener("click", () => {
+    if (notifPanel.classList.contains("open")) {
+      closeNotifPanel();
+    } else {
+      openNotifPanel();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!notifPanel.contains(e.target) && e.target !== notifToggle) {
+      closeNotifPanel();
+    }
+  });
+
+  refreshNotifBadge();
+  setInterval(refreshNotifBadge, 60000);
 
   // opencode의 Question System(질문이 모호하면 옵션이 있는 명확화 질문으로
   // 멈췄다가 답이 오면 재개)을 참고한 되묻기 — 추가 LLM 호출 없이 같은 /chat

@@ -501,3 +501,20 @@ def conversations():
     패널이 conv_id 하나만 기억하는 대신 과거 대화 전체를 보여줄 수 있게 한다
     (읽기 전용, conversation_log 집계만)."""
     return {"conversations": wiki_store.list_conversations()}
+
+
+@app.get("/notifications")
+def notifications():
+    """갱신 사이클(scripts/run_update_cycle.py) 결과 알림을 보여주는 종모양 UI의
+    데이터 소스 — 읽기 전용(notifications 테이블에 쓰는 건 그 오프라인 스크립트
+    뿐, 데모 서빙 경로는 절대 안 씀)."""
+    return {
+        "notifications": wiki_store.list_notifications(),
+        "unread_count": wiki_store.count_unread_notifications(),
+    }
+
+
+@app.post("/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: int):
+    wiki_store.mark_notification_read(notification_id)
+    return {"ok": True}

@@ -458,3 +458,31 @@ def test_feedback_rejects_invalid_thumb_value(client):
         "conv_id": "conv-1", "turn_id": 0, "thumb": "sideways",
     })
     assert resp.status_code == 422
+
+
+def test_notifications_endpoint_lists_unread_count(client):
+    """notifications 테이블에는 데모(/chat 등)가 아니라 갱신 사이클(신뢰된
+    오프라인 스크립트)만 쓴다 — 여기서는 wiki_store.add_notification을 직접
+    호출해 그 결과를 GET /notifications가 읽기만 하는 경로를 검증한다."""
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    wiki_store.add_notification("warning", "회귀로 승격 차단됨", "shadow 1개가 active로 못 감")
+
+    resp = client.get("/notifications")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["unread_count"] == 2
+    assert len(body["notifications"]) == 2
+    assert body["notifications"][0]["title"] == "회귀로 승격 차단됨"  # 최신순
+
+
+def test_notifications_mark_read_decrements_unread_count(client):
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    notif_id = wiki_store.list_notifications()[0]["id"]
+
+    resp = client.post(f"/notifications/{notif_id}/read")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    body = client.get("/notifications").json()
+    assert body["unread_count"] == 0
+    assert body["notifications"][0]["read"] == 1
