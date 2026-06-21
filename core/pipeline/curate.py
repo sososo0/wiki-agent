@@ -72,6 +72,25 @@ def _slugify(text: str) -> str:
     return slug[:40] or "gap"
 
 
+def gap_entry_id(norm_query: str) -> str:
+    """norm_query -> 결정적 entry_id. LLM 호출과 무관하게 계산 가능 — curate()가
+    LLM을 부르기 전에 호출부(run_update_cycle.py)가 이미 게이트 거부된 적이
+    있는 gap인지 먼저 확인할 수 있어야 하므로 별도 공개 함수로 분리한다
+    (doc_chunk_entry_id와 동일한 목적)."""
+    slug = _slugify(norm_query)
+    digest = hashlib.sha1(norm_query.encode("utf-8")).hexdigest()[:8]
+    return f"wiki_gap_{slug}_{digest}"
+
+
+def rejected_gap_entry_id(norm_query: str) -> str:
+    """게이트가 거부한 gap을 norm_query 단위로 기억하는 전용 entry_id
+    (dedupe.rejected_entry_id와 동일한 목적 — 문서 ingestion은 chunk_hash로
+    "콘텐츠 불변"을 판단하지만, gap은 콘텐츠가 질문 문구 자체이므로 norm_query가
+    그 역할을 한다). base gap entry_id와 네임스페이스가 겹치지 않아 나중에 그
+    질문이 진짜 active/shadow가 될 자리를 침범하지 않는다."""
+    return f"{gap_entry_id(norm_query)}_rej"
+
+
 def curate(
     gap: Dict[str, Any],
     *,
@@ -85,9 +104,7 @@ def curate(
     llm_fn = llm_fn or (lambda qs: default_llm_fn(qs, model=model))
     drafted = llm_fn(gap["query_examples"])
 
-    slug = _slugify(gap["norm_query"])
-    digest = hashlib.sha1(gap["norm_query"].encode("utf-8")).hexdigest()[:8]
-    entry_id = f"wiki_gap_{slug}_{digest}"
+    entry_id = gap_entry_id(gap["norm_query"])
 
     # LLM이 tier를 빼먹거나 오타를 내도(예: "Advanced") 파이프라인이 멈추지 않게
     # 유효한 3개 값 중 하나가 아니면 advanced로 폴백 — 실제 운영 중 반복된
