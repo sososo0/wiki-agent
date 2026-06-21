@@ -11,6 +11,7 @@ embed_fn/rerank_fn을 스텁 주입할 수 없으므로 여기서는 demo.app.ge
 """
 
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +23,27 @@ from fastapi.testclient import TestClient
 
 from core import retrieval, wiki_store
 from demo import app as demo_app
+
+
+def _fake_anthropic_client(response_text: str):
+    """generate()가 호출하는 _anthropic_client().messages.create(...)를 흉내내는
+    가짜 클라이언트 — 모델이 실제로 반환한 raw text를 그대로 흘려보내 JSON
+    파싱/폴백 로직을 LLM 호출 없이 검증할 수 있게 한다."""
+    class _Block:
+        type = "text"
+        text = response_text
+
+    class _Resp:
+        content = [_Block()]
+
+    class _Messages:
+        def create(self, **kwargs):
+            return _Resp()
+
+    class _Client:
+        messages = _Messages()
+
+    return _Client()
 
 
 def _stub_embed_fn(texts):
@@ -41,11 +63,23 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         demo_app, "generate",
-        lambda query, hits, model=None, hint="general": {"answer": "stub answer", "entry_ids_used": []},
+        lambda query, hits, model=None, hint="general", force_answer=False: {
+            "type": "answer", "answer": "stub answer", "entry_ids_used": [],
+        },
     )
     monkeypatch.setattr(demo_app, "generate_title", lambda query, model=None: "stub title")
     monkeypatch.setattr(retrieval, "default_embed_fn", _stub_embed_fn)
     monkeypatch.setattr(retrieval, "default_rerank_fn", _stub_rerank_fn)
+    # 호출 예산/보안 상태는 모두 모듈 전역(dict)이라 테스트 간에 그대로 남으면
+    # 순서/실행 횟수에 따라 한도 초과가 다르게 발생할 수 있다 — 매 테스트 시작
+    # 전 깨끗한 상태로 리셋해 격리한다. TestClient는 매 요청을 같은 고정 IP로
+    # 보내므로(버스트/일일 IP 한도가 공유) 리셋이 없으면 테스트가 누적된 카운트로
+    # 서로 영향을 준다.
+    demo_app._daily_budget.update({"date": None, "count": 0})
+    demo_app._conv_call_counts.clear()
+    demo_app._ip_daily_counts.clear()
+    demo_app._ip_burst_log.clear()
+    demo_app._pending_clarifications.clear()
 
     with TestClient(demo_app.app) as c:
         yield c
@@ -140,3 +174,315 @@ def test_feedback_writes_feedback_row(client):
     conn.close()
     assert row is not None
     assert row["thumb"] == "up"
+
+
+def test_feedback_stores_optional_reason(client):
+    client.post("/feedback", json={
+        "conv_id": "conv-reason", "turn_id": 0, "thumb": "down", "reason": "근거 부족",
+    })
+
+    conn = wiki_store._conn()
+    row = conn.execute(
+        "SELECT thumb, reason FROM feedback WHERE conv_id=? AND turn_id=?",
+        ("conv-reason", 0),
+    ).fetchone()
+    conn.close()
+    assert row["thumb"] == "down"
+    assert row["reason"] == "근거 부족"
+
+
+def test_chat_passes_through_clarify_response_without_extra_call(client, monkeypatch):
+    """generate()가 clarify를 반환하면 /chat이 그 모양 그대로 전달해야 한다 —
+    추가 LLM 호출 없이 같은 1회 호출 응답을 그대로 쓰는 게 핵심 설계."""
+    calls = []
+
+    def _stub_generate(query, hits, model=None, hint="general", force_answer=False):
+        calls.append(force_answer)
+        return {
+            "type": "clarify",
+            "question": "어떤 타임아웃을 말씀하시는 건가요?",
+            "options": ["connect timeout", "read timeout", "total timeout"],
+        }
+
+    monkeypatch.setattr(demo_app, "generate", _stub_generate)
+
+    resp = client.post("/chat", json={
+        "conv_id": "conv-clarify", "turn_id": 0, "message": "타임아웃을 어떻게 설정해?",
+    })
+    body = resp.json()
+    assert body["type"] == "clarify"
+    assert body["question"] == "어떤 타임아웃을 말씀하시는 건가요?"
+    assert body["options"] == ["connect timeout", "read timeout", "total timeout"]
+    assert body["cited_entry_ids"] == []
+    assert calls == [False]  # force_answer는 클라이언트가 보낸 값 그대로 전달됨
+
+    conn = wiki_store._conn()
+    row = conn.execute(
+        "SELECT answer FROM conversation_log WHERE conv_id=? AND turn_id=?",
+        ("conv-clarify", 0),
+    ).fetchone()
+    conn.close()
+    assert row["answer"] == "어떤 타임아웃을 말씀하시는 건가요?"
+
+
+def test_chat_force_answer_without_pending_state_falls_back_to_new_question(client, monkeypatch):
+    """force_answer=True인데 서버에 그 conv_id의 pending 명확화 상태가 없으면
+    (예: 만료됐거나 클라이언트가 잘못 보냄) req.message를 그대로 새 질문으로
+    처리해야 한다 — force_answer=True를 무비판적으로 generate()에 넘기면 안 됨."""
+    calls = []
+    monkeypatch.setattr(
+        demo_app, "generate",
+        lambda query, hits, model=None, hint="general", force_answer=False: (
+            calls.append((query, force_answer))
+            or {"type": "answer", "answer": "ok", "entry_ids_used": []}
+        ),
+    )
+    client.post("/chat", json={
+        "conv_id": "conv-force", "turn_id": 0, "message": "엉뚱한 새 질문",
+        "force_answer": True,
+    })
+    assert calls == [("엉뚱한 새 질문", False)]
+
+
+def test_chat_real_harness_resumes_pending_clarification_server_side(client, monkeypatch):
+    """"진짜 하네스" 핵심 동작: clarify가 나가면 서버가 원본 질문을 pending으로
+    저장하고, 사용자가 선택 텍스트만(문자열 조합 없이) 보내면 서버가 원본과
+    합쳐 generate()를 호출해야 한다."""
+    calls = []
+
+    def _stub_generate(query, hits, model=None, hint="general", force_answer=False):
+        calls.append((query, force_answer))
+        if not force_answer:
+            return {
+                "type": "clarify",
+                "question": "어떤 타임아웃을 말씀하시는 건가요?",
+                "options": ["connect timeout", "read timeout"],
+            }
+        return {"type": "answer", "answer": "read timeout 설정 방법은...", "entry_ids_used": []}
+
+    monkeypatch.setattr(demo_app, "generate", _stub_generate)
+
+    first = client.post("/chat", json={
+        "conv_id": "conv-harness", "turn_id": 0, "message": "타임아웃을 어떻게 설정해?",
+    })
+    assert first.json()["type"] == "clarify"
+    assert "conv-harness" in demo_app._pending_clarifications
+
+    second = client.post("/chat", json={
+        # 클라이언트는 선택한 옵션 텍스트만 보낸다 — "원래 질문 — 선택" 조합 없음.
+        "conv_id": "conv-harness", "turn_id": 1, "message": "read timeout",
+        "force_answer": True,
+    })
+    assert second.json()["type"] == "answer"
+    assert calls[1] == ("타임아웃을 어떻게 설정해? — read timeout", True)
+    # pending은 한 번 쓰면 사라져야 한다(같은 명확화에 두 번 답할 수 없음).
+    assert "conv-harness" not in demo_app._pending_clarifications
+
+
+def test_chat_expired_pending_clarification_is_treated_as_new_question(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        demo_app, "generate",
+        lambda query, hits, model=None, hint="general", force_answer=False: (
+            calls.append((query, force_answer))
+            or {"type": "answer", "answer": "ok", "entry_ids_used": []}
+        ),
+    )
+    demo_app._pending_clarifications["conv-expired"] = {
+        "query": "원본 질문",
+        "created_at": time.time() - demo_app.PENDING_CLARIFY_TTL_SECONDS - 1,
+    }
+
+    client.post("/chat", json={
+        "conv_id": "conv-expired", "turn_id": 0, "message": "새 답변",
+        "force_answer": True,
+    })
+    assert calls == [("새 답변", False)]
+
+
+def test_chat_blocks_llm_call_when_daily_budget_exhausted(client, monkeypatch):
+    """일일 한도를 다 쓰면 generate()를 호출하지 않고 바로 안내 메시지를 반환해야
+    한다 — 호출이 일어났다면 스텁이 예외를 던져 테스트가 실패한다."""
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("generate() should not be called when budget is exhausted")
+
+    monkeypatch.setattr(demo_app, "generate", _should_not_be_called)
+    monkeypatch.setattr(demo_app, "DAILY_CALL_LIMIT", 0)
+
+    resp = client.post("/chat", json={
+        "conv_id": "conv-budget", "turn_id": 0, "message": "any question",
+    })
+    body = resp.json()
+    assert body["answer"] == demo_app.BUDGET_EXCEEDED_MESSAGE
+    assert body["type"] == "answer"
+
+
+def test_chat_blocks_llm_call_when_per_conversation_budget_exhausted(client, monkeypatch):
+    monkeypatch.setattr(demo_app, "PER_CONV_CALL_LIMIT", 1)
+
+    first = client.post("/chat", json={
+        "conv_id": "conv-percap", "turn_id": 0, "message": "first question",
+    })
+    assert first.json()["answer"] == "stub answer"
+
+    second = client.post("/chat", json={
+        "conv_id": "conv-percap", "turn_id": 1, "message": "second question",
+    })
+    assert second.json()["answer"] == demo_app.BUDGET_EXCEEDED_MESSAGE
+
+    # 다른 대화는 이 conv_id의 한도와 무관하게 정상 동작해야 한다.
+    other = client.post("/chat", json={
+        "conv_id": "conv-other", "turn_id": 0, "message": "third question",
+    })
+    assert other.json()["answer"] == "stub answer"
+
+
+def test_generate_falls_back_to_answer_when_model_disobeys_force_answer(monkeypatch):
+    """실제로 발견된 버그의 회귀 테스트: force_answer=True인데도 모델이 (haiku가
+    "다시 묻지 마라" 지시를 완벽히 따르지 않아) clarify 모양 JSON을 반환하면,
+    그 내용을 버리고 "답변이 끊겼습니다"로 대체하던 게 원래 버그였다 — 사용자에게는
+    "답변이 끊기고 되묻기도 반영이 안 된다"는 증상 하나로 보였다. question/options를
+    답변으로 재구성해 보여줘야 한다."""
+    clarify_json = (
+        '{"type": "clarify", "question": "어떤 타임아웃을 말씀하시는 건가요?", '
+        '"options": ["connect timeout", "read timeout"]}'
+    )
+    monkeypatch.setattr(
+        demo_app, "_anthropic_client", lambda: _fake_anthropic_client(clarify_json),
+    )
+
+    result = demo_app.generate(
+        "타임아웃을 어떻게 설정해? — read timeout",
+        [{"entry_id": "wiki_1", "topic": "t", "canonical": "c"}],
+        force_answer=True,
+    )
+
+    assert result["type"] == "answer"
+    assert "어떤 타임아웃을 말씀하시는 건가요?" in result["answer"]
+    assert "connect timeout" in result["answer"]
+    assert result["entry_ids_used"] == ["wiki_1"]
+
+
+def test_generate_returns_clarify_when_model_asks_and_not_forced(monkeypatch):
+    clarify_json = (
+        '{"type": "clarify", "question": "어떤 타임아웃을 말씀하시는 건가요?", '
+        '"options": ["connect timeout", "read timeout"]}'
+    )
+    monkeypatch.setattr(
+        demo_app, "_anthropic_client", lambda: _fake_anthropic_client(clarify_json),
+    )
+
+    result = demo_app.generate(
+        "타임아웃을 어떻게 설정해?",
+        [{"entry_id": "wiki_1", "topic": "t", "canonical": "c"}],
+        force_answer=False,
+    )
+
+    assert result["type"] == "clarify"
+    assert result["question"] == "어떤 타임아웃을 말씀하시는 건가요?"
+    assert result["options"] == ["connect timeout", "read timeout"]
+
+
+def test_generate_keeps_clarify_type_when_model_gives_no_options(monkeypatch):
+    """실제로 발견된 버그의 회귀 테스트: 모델이 옵션 없이(빈 배열) clarify를
+    반환하면, 조용히 일반 answer로 바꿔치기해서 옵션 UI 전체가 사라지는 게
+    원래 버그였다(사용자에게는 "옵션이 안 보임"으로 보임). 옵션이 0개여도
+    type은 clarify를 유지해야 한다 — 프런트엔드 자유 입력창은 그래도 쓸 수 있다."""
+    clarify_json = (
+        '{"type": "clarify", "question": "어떤 타임아웃을 말씀하시는 건가요?", "options": []}'
+    )
+    monkeypatch.setattr(
+        demo_app, "_anthropic_client", lambda: _fake_anthropic_client(clarify_json),
+    )
+
+    result = demo_app.generate(
+        "타임아웃을 어떻게 설정해?",
+        [{"entry_id": "wiki_1", "topic": "t", "canonical": "c"}],
+        force_answer=False,
+    )
+
+    assert result["type"] == "clarify"
+    assert result["question"] == "어떤 타임아웃을 말씀하시는 건가요?"
+    assert result["options"] == []
+
+
+def test_chat_blocks_llm_call_when_per_ip_daily_budget_exhausted(client, monkeypatch):
+    """conv_id를 바꿔도 같은 IP면 IP 일일 한도에 걸려야 한다 — conv_id는
+    클라이언트가 임의로 새로 만들 수 있는 값이라, 대화당 한도만으로는
+    공격자가 매 요청마다 새 conv_id를 보내 한도를 우회할 수 있다."""
+    monkeypatch.setattr(demo_app, "PER_IP_DAILY_CALL_LIMIT", 1)
+
+    first = client.post("/chat", json={
+        "conv_id": "conv-ip-1", "turn_id": 0, "message": "first question",
+    })
+    assert first.json()["answer"] == "stub answer"
+
+    second = client.post("/chat", json={
+        "conv_id": "conv-ip-2", "turn_id": 0, "message": "second question, new conv_id",
+    })
+    assert second.json()["answer"] == demo_app.BUDGET_EXCEEDED_MESSAGE
+
+
+def test_burst_limit_blocks_rapid_requests_across_any_endpoint(client, monkeypatch):
+    """버스트 한도는 /chat뿐 아니라 모든 엔드포인트에 미들웨어로 걸려야 한다 —
+    검색/그래프 연산도 서버 CPU 비용이 있어서 LLM 호출 여부와 무관하게 막아야
+    하기 때문."""
+    monkeypatch.setattr(demo_app, "BURST_LIMIT", 2)
+
+    ok1 = client.get("/history/some-conv")
+    ok2 = client.get("/history/some-conv")
+    blocked = client.get("/history/some-conv")
+
+    assert ok1.status_code == 200
+    assert ok2.status_code == 200
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+
+
+def test_chat_rejects_oversized_message(client):
+    resp = client.post("/chat", json={
+        "conv_id": "conv-toolong", "turn_id": 0, "message": "x" * 2001,
+    })
+    assert resp.status_code == 422
+
+
+def test_chat_rejects_malformed_conv_id(client):
+    resp = client.post("/chat", json={
+        "conv_id": "<script>alert(1)</script>", "turn_id": 0, "message": "hello",
+    })
+    assert resp.status_code == 422
+
+
+def test_feedback_rejects_invalid_thumb_value(client):
+    resp = client.post("/feedback", json={
+        "conv_id": "conv-1", "turn_id": 0, "thumb": "sideways",
+    })
+    assert resp.status_code == 422
+
+
+def test_notifications_endpoint_lists_unread_count(client):
+    """notifications 테이블에는 데모(/chat 등)가 아니라 갱신 사이클(신뢰된
+    오프라인 스크립트)만 쓴다 — 여기서는 wiki_store.add_notification을 직접
+    호출해 그 결과를 GET /notifications가 읽기만 하는 경로를 검증한다."""
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    wiki_store.add_notification("warning", "회귀로 승격 차단됨", "shadow 1개가 active로 못 감")
+
+    resp = client.get("/notifications")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["unread_count"] == 2
+    assert len(body["notifications"]) == 2
+    assert body["notifications"][0]["title"] == "회귀로 승격 차단됨"  # 최신순
+
+
+def test_notifications_mark_read_decrements_unread_count(client):
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    notif_id = wiki_store.list_notifications()[0]["id"]
+
+    resp = client.post(f"/notifications/{notif_id}/read")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    body = client.get("/notifications").json()
+    assert body["unread_count"] == 0
+    assert body["notifications"][0]["read"] == 1

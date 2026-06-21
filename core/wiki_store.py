@@ -60,13 +60,26 @@ CREATE TABLE IF NOT EXISTS conversation_log (
 );
 
 CREATE TABLE IF NOT EXISTS feedback (
-  conv_id TEXT, turn_id INTEGER, thumb TEXT, ts REAL
+  conv_id TEXT, turn_id INTEGER, thumb TEXT, reason TEXT DEFAULT NULL, ts REAL
 );
 
 -- 대화별 표시용 제목(첫 턴에 1회 생성). conversation_log의 원본 질문/답변과는
 -- 별개로, "이전 대화" 목록 UI가 매번 다시 요약하지 않도록 캐시해 둔다.
 CREATE TABLE IF NOT EXISTS conversation_meta (
   conv_id TEXT PRIMARY KEY, title TEXT, created_at REAL
+);
+
+-- 갱신 사이클(scripts/run_update_cycle.py) 결과 알림. KB(wiki_entry)가 아니라
+-- 운영 알리미 데이터라 HARD CONSTRAINT(에이전트는 KB에 직접 못 씀)와 무관하다 —
+-- 쓰기는 오직 신뢰된 오프라인 스크립트에서만 일어나고, 데모 서빙 경로(/chat)는
+-- 절대 쓰지 않는다.
+CREATE TABLE IF NOT EXISTS notifications (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  level       TEXT NOT NULL,        -- info | warning | error
+  title       TEXT NOT NULL,
+  message     TEXT NOT NULL,
+  created_at  REAL,
+  read        INTEGER DEFAULT 0
 );
 """
 
@@ -112,6 +125,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(wiki_entry)")}
     if "tier" not in cols:
         conn.execute("ALTER TABLE wiki_entry ADD COLUMN tier TEXT DEFAULT NULL")
+    feedback_cols = {row["name"] for row in conn.execute("PRAGMA table_info(feedback)")}
+    if "reason" not in feedback_cols:
+        conn.execute("ALTER TABLE feedback ADD COLUMN reason TEXT DEFAULT NULL")
 
 
 def init_db(seed: bool = True) -> None:
@@ -239,7 +255,7 @@ def list_feedback() -> List[Dict[str, Any]]:
     """feedback 전체를 반환 (피드백 파이프라인의 집계 신호 입력)."""
     conn = _conn()
     rows = conn.execute(
-        "SELECT conv_id, turn_id, thumb, ts FROM feedback").fetchall()
+        "SELECT conv_id, turn_id, thumb, reason, ts FROM feedback").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -378,10 +394,55 @@ def set_conversation_title(conv_id: str, title: str) -> None:
     conn.close()
 
 
-def submit_feedback(conv_id, turn_id, thumb):
+def submit_feedback(conv_id, turn_id, thumb, reason=None):
+    """reason: 👎일 때 데모 UI가 고정 후보(예: "근거 부족") 중 고른 짧은 이유.
+    LLM 호출 없이 정적 후보를 그대로 저장만 한다 — 비용 없는 신호 보강."""
     conn = _conn()
-    conn.execute("INSERT INTO feedback (conv_id, turn_id, thumb, ts) VALUES (?,?,?,?)",
-                 (conv_id, turn_id, thumb, time.time()))
+    conn.execute(
+        "INSERT INTO feedback (conv_id, turn_id, thumb, reason, ts) VALUES (?,?,?,?,?)",
+        (conv_id, turn_id, thumb, reason, time.time()))
+    conn.commit()
+    conn.close()
+
+
+def add_notification(level: str, title: str, message: str, *, conn=None) -> None:
+    """갱신 사이클(scripts/run_update_cycle.py) 결과 알림 1건 추가. level은
+    info|warning|error — 호출부가 의미를 정하고 여기서는 검증하지 않는다(그
+    판정 로직은 run_update_cycle.py에 둬서 LLM 없이 단위 테스트하기 쉽게 함).
+    데모의 종모양 알림 UI(GET /notifications)가 이걸 읽는다."""
+    own = conn is None
+    conn = conn or _conn()
+    conn.execute(
+        "INSERT INTO notifications (level, title, message, created_at, read) VALUES (?,?,?,?,0)",
+        (level, title, message, time.time()))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+def list_notifications(limit: int = 50) -> List[Dict[str, Any]]:
+    """최신순으로 반환(읽기 전용) — 데모 종모양 패널이 그대로 보여줌."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT id, level, title, message, created_at, read
+           FROM notifications ORDER BY created_at DESC LIMIT ?""",
+        (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_unread_notifications() -> int:
+    conn = _conn()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM notifications WHERE read = 0").fetchone()[0]
+    conn.close()
+    return n
+
+
+def mark_notification_read(notification_id: int) -> None:
+    conn = _conn()
+    conn.execute(
+        "UPDATE notifications SET read = 1 WHERE id = ?", (notification_id,))
     conn.commit()
     conn.close()
 

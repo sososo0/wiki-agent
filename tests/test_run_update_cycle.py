@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from core import wiki_store
-from scripts.run_update_cycle import run_cycle
+from scripts.run_update_cycle import run_cycle, summary_notifications
 
 PASSWORD_QUERY = "how do I reset my password"
 DELETE_QUERY = "how do I delete my account"
@@ -89,3 +89,85 @@ def test_run_cycle_creates_shadow_for_good_patch_and_blocks_bad_patch(tmp_path, 
 
     # promote는 일부러 회귀로 평가되므로 커밋되지 않아야 shadow 상태가 보존된다.
     assert result["promote"]["promoted"] is False
+
+    # 이번 사이클에서 shadow가 생겼는데도 승격이 안 됐으니, 종모양 알림 UI가
+    # 보여줄 "회귀로 승격 차단됨" 경고가 떠 있어야 한다(실제 DB에 쓰였는지까지).
+    levels = {n["level"] for n in wiki_store.list_notifications()}
+    assert "warning" in levels
+
+
+def _base_summary(**overrides):
+    summary = {
+        "mined": 0,
+        "feedback": {"n": 0, "down": 0, "down_rate": 0.0},
+        "shadow_written": [],
+        "promote": {"promoted": True, "activated_entry_ids": []},
+    }
+    summary.update(overrides)
+    return summary
+
+
+def test_summary_notifications_always_includes_one_info_summary():
+    notes = summary_notifications(_base_summary())
+    assert len(notes) == 1
+    assert notes[0][0] == "info"
+
+
+def test_summary_notifications_warns_on_high_down_rate():
+    summary = _base_summary(feedback={"n": 10, "down": 8, "down_rate": 0.8})
+    notes = summary_notifications(summary)
+    levels = [n[0] for n in notes]
+    assert "warning" in levels
+    assert any("부정" in n[1] for n in notes if n[0] == "warning")
+
+
+def test_summary_notifications_does_not_warn_on_high_down_rate_with_too_few_samples():
+    """down_rate가 높아도 표본이 너무 적으면(n<5) 노이즈일 뿐이라 경고하지 않는다."""
+    summary = _base_summary(feedback={"n": 2, "down": 2, "down_rate": 1.0})
+    notes = summary_notifications(summary)
+    assert [n[0] for n in notes] == ["info"]
+
+
+def test_summary_notifications_warns_when_shadow_written_but_not_promoted():
+    summary = _base_summary(
+        shadow_written=["wiki_gap_x"],
+        promote={"promoted": False, "activated_entry_ids": []},
+    )
+    notes = summary_notifications(summary)
+    levels = [n[0] for n in notes]
+    assert "warning" in levels
+    assert any("회귀" in n[1] for n in notes if n[0] == "warning")
+
+
+def test_summary_notifications_no_warning_when_nothing_mined_and_not_promoted():
+    """mine된 게 없으면 promoted=False는 그냥 "할 일 없었음"이라 경고가 아니다."""
+    summary = _base_summary(promote={"promoted": False, "activated_entry_ids": []})
+    notes = summary_notifications(summary)
+    assert [n[0] for n in notes] == ["info"]
+
+
+def test_run_cycle_writes_error_notification_and_reraises_on_crash(tmp_path, monkeypatch):
+    """사이클이 예외로 죽어도 종모양 알림에 남아야 한다 — 삼키지 않고
+    그대로 재raise해 hermes cron 자체의 실패 상태도 정상적으로 남아야 함."""
+    import pytest
+
+    db_path = str(tmp_path / "test_run_cycle_crash_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    from scripts import run_update_cycle
+
+    def _broken_run_cycle(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(run_update_cycle, "run_cycle", _broken_run_cycle)
+    monkeypatch.setattr(sys, "argv", ["run_update_cycle.py"])
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_update_cycle.main()
+
+    notes = wiki_store.list_notifications()
+    assert len(notes) == 1
+    assert notes[0]["level"] == "error"
+    assert "boom" in notes[0]["message"]
