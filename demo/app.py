@@ -15,6 +15,7 @@ KB에 직접 쓰는 경로는 열지 않는다 — search_wiki/log_turn/submit_f
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -89,17 +90,22 @@ _HINT_GUIDANCE = {
 def classify_question(query: str) -> Dict[str, Any]:
     """질문 키워드로 유형(hint)과 동적 검색 k를 정한다. 순서는 더 구체적인
     유형(comparison/troubleshooting)을 먼저 검사해 일반적인 how-to/definition
-    키워드와 겹칠 때 더 구체적인 유형이 이긴다."""
+    키워드와 겹칠 때 더 구체적인 유형이 이긴다.
+
+    k 값은 코퍼스 규모(2026-06 기준 약 400개 엔트리)에 맞춰 보정한 값이다 —
+    코퍼스가 109개였을 때 정한 더 작은 k(3~8)로는 토픽이 겹치는 엔트리가 많아져
+    의도한 정답이 top-k 밖으로 밀려나는 경우가 실측으로 확인됨(예시 질문 버튼
+    4/6개가 답을 못 찾음). 코퍼스가 더 커지면 이 값도 다시 올려야 한다."""
     q = query.lower()
     if any(kw in q for kw in _COMPARISON_KEYWORDS):
-        return {"hint": "comparison", "k": 8}
+        return {"hint": "comparison", "k": 10}
     if any(kw in q for kw in _TROUBLESHOOTING_KEYWORDS):
-        return {"hint": "troubleshooting", "k": 6}
+        return {"hint": "troubleshooting", "k": 8}
     if any(kw in q for kw in _HOWTO_KEYWORDS):
-        return {"hint": "howto", "k": 6}
+        return {"hint": "howto", "k": 8}
     if any(kw in q for kw in _DEFINITION_KEYWORDS):
-        return {"hint": "definition", "k": 3}
-    return {"hint": "general", "k": 5}
+        return {"hint": "definition", "k": 6}
+    return {"hint": "general", "k": 7}
 
 
 def _extract_json_object(text: str) -> str:
@@ -108,6 +114,20 @@ def _extract_json_object(text: str) -> str:
     if start == -1 or end == -1 or end < start:
         return text
     return text[start:end + 1]
+
+
+def _recover_partial_answer(text: str):
+    """max_tokens 한도로 JSON이 중간에 끊겨 _extract_json_object/json.loads가 실패해도,
+    "answer" 필드값은 항상 JSON 맨 앞에 오므로(프롬프트가 그 순서로 요청) 정규식으로
+    값만 복구한다 — 사용자에게 끊긴 중괄호/인용부호가 그대로 노출되는 것을 막는다."""
+    match = re.search(r'"answer"\s*:\s*"', text)
+    if not match:
+        return None
+    raw = text[match.end():]
+    end = raw.find('",')
+    value = raw[:end] if end != -1 else raw
+    value = value.replace("\\\\", "\\").replace('\\"', '"').replace("\\n", "\n")
+    return value.strip() or None
 
 
 def generate(query: str, hits, model: str = DEMO_MODEL, hint: str = "general") -> Dict[str, Any]:
@@ -138,7 +158,7 @@ def generate(query: str, hits, model: str = DEMO_MODEL, hint: str = "general") -
     )
     resp = _anthropic_client().messages.create(
         model=model,
-        max_tokens=500,
+        max_tokens=900,
         messages=[{"role": "user", "content": prompt}],
     )
     text = next((b.text for b in resp.content if b.type == "text"), "")
@@ -151,9 +171,12 @@ def generate(query: str, hits, model: str = DEMO_MODEL, hint: str = "general") -
             }
     except (json.JSONDecodeError, ValueError):
         pass
-    # 모델이 JSON을 안 지켰을 때의 안전한 폴백 — 원문 그대로 답변으로 쓰고
-    # 인용 항목은 검색된 전체 후보로 대체한다.
-    return {"answer": text, "entry_ids_used": [h["entry_id"] for h in hits]}
+    # JSON이 깨졌을 때(보통 max_tokens 한도로 중간에 끊김) 잘린 중괄호/인용부호를
+    # 그대로 보여주는 대신, 복구 가능한 answer 텍스트를 우선 쓰고 그것도 없으면
+    # 명확한 안내 문구로 대체한다.
+    recovered = _recover_partial_answer(text)
+    answer = recovered or "답변 생성이 길어져 응답이 끊겼습니다. 다시 질문해 주세요."
+    return {"answer": answer, "entry_ids_used": [h["entry_id"] for h in hits]}
 
 
 def generate_title(query: str, model: str = DEMO_MODEL) -> str:

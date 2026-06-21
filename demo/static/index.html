@@ -83,6 +83,8 @@
   .msg.bot .md a { color: var(--accent); }
   .msg.bot .md blockquote { margin: 0 0 8px; padding-left: 10px; border-left: 3px solid var(--border); color: #64748b; }
   .sources { font-size: 12px; color: #64748b; margin-top: 6px; }
+  .sources a { color: var(--accent); text-decoration: none; }
+  .sources a:hover { text-decoration: underline; }
   .feedback { margin-top: 4px; }
   .feedback button { border: none; background: none; cursor: pointer; font-size: 15px; opacity: 0.4; }
   .feedback button:hover { opacity: 1; }
@@ -162,12 +164,12 @@
             확인하세요.</li>
         </ul>
         <div class="examples">
-          <button type="button" data-q="요청이 타임아웃되거나 서버 에러가 났을 때 어떻게 재시도해야 해?">재시도는 어떻게?</button>
+          <button type="button" data-q="exponential backoff와 jitter는 왜 같이 써야 해?">재시도는 어떻게?</button>
           <button type="button" data-q="hedged request가 뭐고 언제 써야 해?">hedged request란?</button>
-          <button type="button" data-q="멀티테넌트 시스템에서 한 테넌트가 DB 커넥션을 다 써버리는 걸 막으려면 어떻게 해야 해?">테넌트 리소스 격리</button>
-          <button type="button" data-q="시스템이 과부하일 때 모든 요청을 큐에 쌓는 것보다 일부를 거부하는 게 나을까?">과부하 시 로드 셰딩</button>
+          <button type="button" data-q="connection pool에 idle timeout을 두는 이유가 뭐야?">idle timeout 설정</button>
+          <button type="button" data-q="leaky bucket과 token bucket 알고리즘의 차이가 뭐야?">레이트리밋 알고리즘 비교</button>
           <button type="button" data-q="토큰 버킷의 capacity는 어떻게 정해야 해?">토큰 버킷 sizing</button>
-          <button type="button" data-q="connect timeout과 read timeout의 차이가 뭐야?">timeout 종류 비교</button>
+          <button type="button" data-q="connect timeout이 뭐야?">connect timeout이란?</button>
         </div>
       </div>
       <div id="log"></div>
@@ -273,7 +275,18 @@
     if (retrieved && retrieved.length) {
       const src = document.createElement("div");
       src.className = "sources";
-      src.textContent = "근거: " + retrieved.map(h => h.entry_id).join(", ");
+      src.append("근거: ");
+      retrieved.forEach((h, i) => {
+        if (i > 0) src.append(", ");
+        const a = document.createElement("a");
+        // 그래프 뷰가 ?focus=entry_id를 받으면 해당 노드를 선택/포커스하므로
+        // entry_id 텍스트가 실질적인 "출처 링크" 역할을 한다(전용 상세 페이지는
+        // 없음 — README 참고).
+        a.href = `/static/graph.html?focus=${encodeURIComponent(h.entry_id)}`;
+        a.target = "_blank";
+        a.textContent = h.entry_id;
+        src.appendChild(a);
+      });
       div.appendChild(src);
     }
 

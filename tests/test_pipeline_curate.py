@@ -56,3 +56,25 @@ def test_curate_propagates_llm_fn_errors():
     import pytest
     with pytest.raises(ValueError):
         curate.curate(GAP, llm_fn=_broken_llm_fn)
+
+
+def test_curate_keeps_valid_tier_from_llm_fn():
+    def _llm_fn_with_tier(qs):
+        return {**_stub_llm_fn(qs), "tier": "intermediate"}
+
+    patch = curate.curate(GAP, llm_fn=_llm_fn_with_tier)
+    assert patch["tier"] == "intermediate"
+
+
+def test_curate_falls_back_to_advanced_for_missing_or_invalid_tier():
+    """로그 마이닝 경로는 파일명 같은 결정적 신호가 없어 LLM이 tier를 분류하는데,
+    필드가 없거나 오타("Advanced")가 나도 파이프라인이 멈추면 안 되므로 advanced로
+    폴백한다(운영 중 반복된 구체적 질문이라는 gap 특성상 가장 안전한 기본값)."""
+    patch = curate.curate(GAP, llm_fn=_stub_llm_fn)
+    assert patch["tier"] == "advanced"
+
+    def _llm_fn_with_bad_tier(qs):
+        return {**_stub_llm_fn(qs), "tier": "Advanced"}
+
+    patch2 = curate.curate(GAP, llm_fn=_llm_fn_with_bad_tier)
+    assert patch2["tier"] == "advanced"

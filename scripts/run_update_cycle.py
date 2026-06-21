@@ -86,6 +86,7 @@ def run_cycle(
             patch["entry_id"], patch["topic"], patch["canonical"], patch["body_md"],
             status="shadow", provenance=patch["provenance"],
             confidence=patch["confidence"], sources=patch["sources"],
+            tier=patch.get("tier"),
         )
         summary["shadow_written"].append(patch["entry_id"])
         reindex.reindex_changed([patch["entry_id"]])
