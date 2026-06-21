@@ -21,11 +21,11 @@
   .brand h1 { font-size: 16px; margin: 0; }
   .brand p { font-size: 12px; margin: 0; color: #64748b; }
   .header-actions { display: flex; gap: 8px; position: relative; }
-  #new-chat, #history-toggle {
+  #new-chat, #history-toggle, #notif-toggle {
     border: 1px solid var(--border); background: #fff; border-radius: 8px;
     padding: 6px 12px; font-size: 13px; cursor: pointer; color: #374151;
   }
-  #new-chat:hover, #history-toggle:hover { background: #f1f5f9; }
+  #new-chat:hover, #history-toggle:hover, #notif-toggle:hover { background: #f1f5f9; }
 
   #history-panel {
     display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 10;
@@ -43,6 +43,36 @@
   .history-item.active { background: #eff6ff; }
   .history-item .preview { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .history-item .meta { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+
+  #notif-toggle { position: relative; }
+  #notif-badge {
+    position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px;
+    background: #ef4444; color: #fff; border-radius: 999px; font-size: 10px;
+    line-height: 16px; text-align: center; padding: 0 3px; display: none;
+  }
+  #notif-badge.show { display: block; }
+  #notif-panel {
+    display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 10;
+    width: 340px; max-height: 420px; overflow-y: auto;
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08); padding: 6px;
+  }
+  #notif-panel.open { display: block; }
+  #notif-panel .empty { padding: 14px; font-size: 13px; color: #94a3b8; text-align: center; }
+  .notif-item {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 10px; border-radius: 8px; font-size: 13px; color: #1f2937;
+  }
+  .notif-item:hover { background: #f1f5f9; }
+  .notif-item.unread { background: #eff6ff; }
+  .notif-item .row { display: flex; align-items: center; gap: 6px; }
+  .notif-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .notif-item .dot.info { background: #2563eb; }
+  .notif-item .dot.warning { background: #f59e0b; }
+  .notif-item .dot.error { background: #ef4444; }
+  .notif-item .title { font-weight: 600; }
+  .notif-item .message { margin: 4px 0 0; color: #374151; line-height: 1.4; }
+  .notif-item .meta { font-size: 11px; color: #94a3b8; margin-top: 4px; }
 
   main {
     flex: 1; min-height: 0; overflow-y: auto;
@@ -89,6 +119,28 @@
   .feedback button { border: none; background: none; cursor: pointer; font-size: 15px; opacity: 0.4; }
   .feedback button:hover { opacity: 1; }
 
+  .feedback-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .feedback-reasons button {
+    border: 1px solid var(--border); background: #f8fafc; color: #374151;
+    border-radius: 999px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+  }
+  .feedback-reasons button:hover { background: #fee2e2; border-color: #fecaca; color: #b91c1c; }
+
+  .clarify-options { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .clarify-options button {
+    border: 1px solid var(--border); background: #f8fafc; color: #1f2937;
+    border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; text-align: left;
+  }
+  .clarify-options button:hover { background: #eff6ff; border-color: #bfdbfe; color: var(--accent); }
+  .clarify-freeform { display: flex; gap: 6px; margin-top: 8px; }
+  .clarify-freeform input {
+    flex: 1; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px;
+  }
+  .clarify-freeform button {
+    border: none; background: var(--accent); color: white; border-radius: 8px;
+    padding: 7px 12px; font-size: 13px; cursor: pointer;
+  }
+
   .typing-dots { display: inline-flex; gap: 4px; padding: 4px 2px; }
   .typing-dots span {
     width: 6px; height: 6px; border-radius: 50%; background: #94a3b8;
@@ -131,8 +183,10 @@
       </div>
     </div>
     <div class="header-actions">
+      <button id="notif-toggle" type="button">🔔<span id="notif-badge"></span></button>
       <button id="history-toggle" type="button">🕘 이전 대화</button>
       <button id="new-chat" type="button">+ 새 대화</button>
+      <div id="notif-panel"></div>
       <div id="history-panel"></div>
     </div>
   </header>
@@ -296,19 +350,55 @@
     up.textContent = "👍";
     const down = document.createElement("button");
     down.textContent = "👎";
-    [[up, "up"], [down, "down"]].forEach(([btn, thumb]) => {
-      btn.onclick = () => {
-        fetch("/feedback", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conv_id: convId, turn_id: turn, thumb }),
-        });
-        btn.style.opacity = "1";
-      };
-    });
+    up.onclick = () => {
+      submitFeedback(turn, "up", null);
+      up.style.opacity = "1";
+      down.style.display = "none";
+    };
+    down.onclick = () => showFeedbackReasons(fb, down, up, turn);
     fb.appendChild(up);
     fb.appendChild(down);
     div.appendChild(fb);
+  }
+
+  const FEEDBACK_REASONS = ["근거 부족", "주제와 무관", "너무 추상적", "사실과 다름"];
+
+  function submitFeedback(turn, thumb, reason) {
+    fetch("/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conv_id: convId, turn_id: turn, thumb, reason }),
+    });
+  }
+
+  // 👎는 바로 전송하지 않고 짧은 이유 후보를 띄운다(피드백 루프 확장 — LLM
+  // 호출 없이 정적 후보만 보여주는 비용 없는 신호 보강). 이유를 골라야
+  // 비로소 /feedback을 호출하므로, 누르고 아무것도 안 고르면 투표 자체가
+  // 기록되지 않는다 — "이유 없이 제출"로 기존과 같은 동작(이유 없는 👎)도 가능.
+  function showFeedbackReasons(fb, downBtn, upBtn, turn) {
+    if (fb.querySelector(".feedback-reasons")) return;
+    downBtn.style.opacity = "1";
+    const wrap = document.createElement("div");
+    wrap.className = "feedback-reasons";
+    const finish = (reason) => {
+      submitFeedback(turn, "down", reason);
+      wrap.remove();
+      upBtn.style.display = "none";
+      downBtn.disabled = true;
+    };
+    FEEDBACK_REASONS.forEach((reason) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = reason;
+      btn.onclick = () => finish(reason);
+      wrap.appendChild(btn);
+    });
+    const skip = document.createElement("button");
+    skip.type = "button";
+    skip.textContent = "이유 없이 제출";
+    skip.onclick = () => finish(null);
+    wrap.appendChild(skip);
+    fb.appendChild(wrap);
   }
 
   async function loadConversation(id) {
@@ -403,6 +493,155 @@
     }
   });
 
+  // 갱신 사이클(scripts/run_update_cycle.py) 결과를 보여주는 종모양 알림 —
+  // 데모는 쓰기 도구가 없으므로(notifications 테이블은 그 오프라인 스크립트만
+  // 씀) 여기는 순수 읽기/읽음처리만 한다. 60초 폴링으로 배지를 갱신한다(SSE/
+  // 웹소켓 없이 데모 규모에 맞는 단순한 방식).
+  const notifToggle = document.getElementById("notif-toggle");
+  const notifPanel = document.getElementById("notif-panel");
+  const notifBadge = document.getElementById("notif-badge");
+
+  function closeNotifPanel() {
+    notifPanel.classList.remove("open");
+  }
+
+  async function refreshNotifBadge() {
+    try {
+      const resp = await fetch("/notifications");
+      const data = await resp.json();
+      if (data.unread_count > 0) {
+        notifBadge.textContent = data.unread_count > 99 ? "99+" : data.unread_count;
+        notifBadge.classList.add("show");
+      } else {
+        notifBadge.classList.remove("show");
+      }
+      return data.notifications || [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function openNotifPanel() {
+    notifPanel.classList.add("open");
+    notifPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
+    const items = await refreshNotifBadge();
+
+    if (!items.length) {
+      notifPanel.innerHTML = '<div class="empty">알림이 없습니다.</div>';
+      return;
+    }
+
+    notifPanel.innerHTML = "";
+    for (const n of items) {
+      const btn = document.createElement("button");
+      btn.className = "notif-item" + (n.read ? "" : " unread");
+      btn.innerHTML = `
+        <div class="row"><span class="dot ${n.level}"></span><span class="title">${n.title}</span></div>
+        <div class="message">${n.message}</div>
+        <div class="meta">${fmtTime(n.created_at)}</div>
+      `;
+      btn.addEventListener("click", async () => {
+        if (!n.read) {
+          await fetch(`/notifications/${n.id}/read`, { method: "POST" });
+          btn.classList.remove("unread");
+          n.read = 1;
+          refreshNotifBadge();
+        }
+      });
+      notifPanel.appendChild(btn);
+    }
+  }
+
+  notifToggle.addEventListener("click", () => {
+    if (notifPanel.classList.contains("open")) {
+      closeNotifPanel();
+    } else {
+      openNotifPanel();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!notifPanel.contains(e.target) && e.target !== notifToggle) {
+      closeNotifPanel();
+    }
+  });
+
+  refreshNotifBadge();
+  setInterval(refreshNotifBadge, 60000);
+
+  // opencode의 Question System(질문이 모호하면 옵션이 있는 명확화 질문으로
+  // 멈췄다가 답이 오면 재개)을 참고한 되묻기 — 추가 LLM 호출 없이 같은 /chat
+  // 응답 안에서 type:"clarify"로 온다. 사용자가 옵션을 고르면(또는 직접 입력)
+  // "원래 질문 — 선택" 형태로 force_answer:true를 붙여 1회만 더 호출한다
+  // (모호한 질문 1건당 최대 2회 호출로 상한 — 비용 제한과 충돌하지 않음).
+  async function sendToChat(message, turn, forceAnswer) {
+    const typingEl = addTypingIndicator();
+    const resp = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conv_id: convId, turn_id: turn, message, force_answer: forceAnswer }),
+    });
+    const data = await resp.json();
+    typingEl.remove();
+    if (data.type === "clarify") {
+      addClarifyMessage(data, turn);
+    } else {
+      addBotMessage(data.answer, data.retrieved, turn, { progressive: true });
+    }
+  }
+
+  function addClarifyMessage(data, turn) {
+    hideIntro();
+    const div = document.createElement("div");
+    div.className = "msg bot";
+    const md = document.createElement("div");
+    md.className = "md";
+    md.innerHTML = renderMarkdown(data.question);
+    div.appendChild(md);
+
+    const optsWrap = document.createElement("div");
+    optsWrap.className = "clarify-options";
+    const freeform = document.createElement("div");
+    freeform.className = "clarify-freeform";
+
+    // 서버가 원본 질문(query)을 pending 상태로 들고 있으므로(demo/app.py의
+    // _pending_clarifications), 클라이언트는 더 이상 "원래 질문 — 선택"을
+    // 직접 조립하지 않고 사용자가 고른/입력한 답변만 보낸다.
+    const resolve = (choiceText) => {
+      optsWrap.remove();
+      freeform.remove();
+      addMessage("user", choiceText);
+      const nextTurn = turnId++;
+      sendToChat(choiceText, nextTurn, true);
+    };
+
+    (data.options || []).forEach((opt) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = opt;
+      btn.onclick = () => resolve(opt);
+      optsWrap.appendChild(btn);
+    });
+    div.appendChild(optsWrap);
+
+    const freeInput = document.createElement("input");
+    freeInput.type = "text";
+    freeInput.placeholder = "직접 입력...";
+    const freeBtn = document.createElement("button");
+    freeBtn.type = "button";
+    freeBtn.textContent = "전송";
+    freeBtn.onclick = () => {
+      const val = freeInput.value.trim();
+      if (val) resolve(val);
+    };
+    freeform.appendChild(freeInput);
+    freeform.appendChild(freeBtn);
+    div.appendChild(freeform);
+
+    log.appendChild(div);
+    div.scrollIntoView({ block: "end" });
+  }
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const message = input.value.trim();
@@ -411,16 +650,7 @@
 
     addMessage("user", message);
     const turn = turnId++;
-    const typingEl = addTypingIndicator();
-
-    const resp = await fetch("/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conv_id: convId, turn_id: turn, message }),
-    });
-    const data = await resp.json();
-    typingEl.remove();
-    addBotMessage(data.answer, data.retrieved, turn, { progressive: true });
+    await sendToChat(message, turn, false);
   });
 
   if (!convId) {
