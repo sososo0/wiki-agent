@@ -96,6 +96,78 @@ def test_run_cycle_creates_shadow_for_good_patch_and_blocks_bad_patch(tmp_path, 
     assert "warning" in levels
 
 
+def test_run_cycle_window_days_excludes_old_log_rows(tmp_path, monkeypatch):
+    """retrieval_log에 윈도우 밖(예: 30일 전)의 오래된 행만 있으면 기본 window_days로는
+    gap이 마이닝되면 안 된다 — window_days=None(전체 히스토리)을 주면 다시 잡혀야 함.
+    retention 정책 없이 무한히 쌓이는 로그를 매 사이클 전체 재마이닝하면, 오래전에
+    우연히 오염된 쿼리가 영원히 gap으로 재탐지되는 문제(실제로 골드셋 unanswerable
+    문항에서 발생)를 막는 장치."""
+    db_path = str(tmp_path / "test_run_cycle_window_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    old_ts = time.time() - 30 * 86400
+    conn = wiki_store._conn()
+    for _ in range(4):
+        conn.execute(
+            "INSERT INTO retrieval_log (query, retrieved, ts) VALUES (?,?,?)",
+            (PASSWORD_QUERY, json.dumps([{"entry_id": "wiki_0001", "score": -5.0}]), old_ts),
+        )
+    conn.commit()
+    conn.close()
+
+    result_windowed = run_cycle(
+        gold_path=None, k=5, window_days=14,
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+    assert result_windowed["mined"] == 0
+
+    result_full_history = run_cycle(
+        gold_path=None, k=5, window_days=None,
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+    assert result_full_history["mined"] == 1
+
+
+def test_run_cycle_skips_already_rejected_gap_on_next_cycle(tmp_path, monkeypatch):
+    """게이트가 거부한 gap은 같은 retrieval_log 행이 그대로 남아 있어도 다음
+    사이클에선 LLM 호출(curate) 없이 skip돼야 한다 — core/pipeline/dedupe.py의
+    skip_rejected(문서 ingestion)와 동일한 목적, 매 사이클 같은 거부를 반복
+    호출하는 비용 낭비를 막는다."""
+    db_path = str(tmp_path / "test_run_cycle_skip_rejected_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    _seed_retrieval_log(DELETE_QUERY, n=4, score=-5.0)
+
+    curate_calls = []
+
+    def _counting_llm_fn(query_examples):
+        curate_calls.append(query_examples)
+        return _stub_llm_fn(query_examples)
+
+    result1 = run_cycle(
+        gold_path=None, k=5, window_days=None,
+        llm_fn=_counting_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+    assert len(curate_calls) == 1
+    assert any(r.get("reason", "").startswith("failed grounding") for r in result1["rejected"])
+    rejected_ids = {e["entry_id"] for e in wiki_store.list_rejected_entries()}
+    assert any("delet" in eid or "account" in eid for eid in rejected_ids)
+
+    # 같은 retrieval_log 행이 그대로 있어도(재seed 없음) 두 번째 사이클에서
+    # curate가 다시 호출되면 안 된다.
+    result2 = run_cycle(
+        gold_path=None, k=5, window_days=None,
+        llm_fn=_counting_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+    assert len(curate_calls) == 1  # 늘지 않음 -> curate 호출 없이 skip됨
+    assert any("delete" in q.lower() or "account" in q.lower()
+               for q in result2["skipped_rejected_gaps"])
+
+
 def _base_summary(**overrides):
     summary = {
         "mined": 0,

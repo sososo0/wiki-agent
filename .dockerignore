@@ -3,4 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.db
+*.db.backup-*
 .git/
+venv/
+logs/

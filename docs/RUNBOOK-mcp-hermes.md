@@ -132,7 +132,17 @@ cat > ~/.hermes/scripts/wiki_agent_update_cycle.sh <<'EOF'
 set -e
 cd "/ABS/PATH/wiki-agent"
 export WIKI_AGENT_DB="/ABS/PATH/wiki-agent/wiki_agent.db"
-exec "/ABS/PATH/wiki-agent/venv/bin/python" scripts/run_update_cycle.py
+
+LOG_DIR="/ABS/PATH/wiki-agent/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/update_cycle_$(date +%Y%m%d_%H%M%S).log"
+
+nohup "/ABS/PATH/wiki-agent/venv/bin/python" \
+  scripts/run_update_cycle.py > "$LOG_FILE" 2>&1 &
+CYCLE_PID=$!
+disown
+
+echo "wiki-agent update cycle started in background (pid $CYCLE_PID) -> $LOG_FILE"
 EOF
 chmod +x ~/.hermes/scripts/wiki_agent_update_cycle.sh
 
@@ -144,6 +154,14 @@ hermes cron create "0 2 * * *" --name wiki-agent-update-cycle \
 hermes gateway install      # macOS: launchd 유저 서비스로 설치+기동
 hermes cron status          # "Gateway is running — cron jobs will fire automatically" 확인
 ```
+
+> ⚠️ **`exec python scripts/run_update_cycle.py`로 직접 실행하지 말 것.** Hermes의
+> `--no-agent` 스크립트 job에는 (config.yaml에 노출되지 않는) **하드코딩된 120초
+> 타임아웃**이 있다. 골드셋이 늘어나(현재 58문항) 사이클의 평가 단계가 실제 LLM
+> 호출로 120초를 넘기는 경우가 흔해, 직접 실행하면 매번 "Script timed out after 120s"로
+> 죽는다. 위 스크립트처럼 **진짜 작업은 `nohup ... & disown`으로 백그라운드에 던지고
+> 래퍼는 즉시 종료**하는 패턴으로 우회해야 한다 — 로그는 `logs/`(`.gitignore`됨,
+> 타임스탬프별 파일)에서 확인.
 
 - `hermes gateway install`이 설치하는 launchd 서비스는 `LimitLoadToSessionType: Aqua` —
   즉 **그 macOS 계정으로 로그인해 있는 동안에만** 돈다(로그아웃/재부팅 후 미로그인 상태에는
@@ -192,6 +210,14 @@ hermes cron status          # "Gateway is running — cron jobs will fire automa
 발동하는 상태(`hermes cron status` → "Gateway is running")까지 확인됨. 단, 이 launchd
 서비스는 로그인 세션 동안만 동작(위 Step 6 주의 참고) — 항상 켜진 서버 운영이 필요하면
 별도 환경(Linux + 시스템 서비스)으로 옮겨야 한다.
+
+사이클이 끝까지 도는지(120초 타임아웃 우회) 실제로 `hermes cron run <job_id>`로 트리거해
+검증했고, 그 결과로 골드셋의 의도적 unanswerable 문항이 반복 테스트 실행 때문에
+`retrieval_log`에 오염돼 `mine_gaps`가 가짜 gap으로 오인 → `curate`가 그럴듯한 오답을
+만들었지만 `promote_if_better`가 골드셋 회귀(escalation_correctness 1.0→0.0)로 정확히
+막아내는 것까지 실제로 관찰됨 — 안전장치가 설계대로 동작한다는 실증. 사이클 결과(요약/경고)는
+이제 데모 UI의 종모양 알림(`GET /notifications`)에도 쌓인다 — README의 "갱신 사이클 알림"
+참고.
 
 ## 다음에 깊게 팔 후보
 

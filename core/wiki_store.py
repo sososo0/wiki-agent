@@ -241,21 +241,36 @@ def search_wiki(query: str, k: int = 5, *, cache: Dict[str, Any] = None) -> List
     return results
 
 
-def list_retrieval_log() -> List[Dict[str, Any]]:
-    """retrieval_log 전체를 반환 (피드백 파이프라인의 gap 마이닝 입력)."""
+def list_retrieval_log(since_ts: float = None) -> List[Dict[str, Any]]:
+    """retrieval_log를 반환(피드백 파이프라인의 gap 마이닝 입력). since_ts를 주면
+    그 이후 행만 반환 — 안 주면(기본값) 기존 동작과 동일하게 테이블 전체를 반환한다.
+    윈도잉 없이 전체를 매 사이클 다시 마이닝하면 테이블이 무한히 쌓이는 동안 스캔
+    비용도 계속 커지고, 한번 오염된(예: 평가 질문이 우연히 3번 이상 반복된) 쿼리가
+    영원히 gap으로 재탐지된다 — scripts/run_update_cycle.py가 --window-days로 호출."""
     conn = _conn()
-    rows = conn.execute("SELECT id, query, retrieved, ts FROM retrieval_log").fetchall()
+    if since_ts is None:
+        rows = conn.execute("SELECT id, query, retrieved, ts FROM retrieval_log").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, query, retrieved, ts FROM retrieval_log WHERE ts >= ?",
+            (since_ts,)).fetchall()
     conn.close()
     return [{"id": r["id"], "query": r["query"],
              "retrieved": json.loads(r["retrieved"]) if r["retrieved"] else [],
              "ts": r["ts"]} for r in rows]
 
 
-def list_feedback() -> List[Dict[str, Any]]:
-    """feedback 전체를 반환 (피드백 파이프라인의 집계 신호 입력)."""
+def list_feedback(since_ts: float = None) -> List[Dict[str, Any]]:
+    """feedback을 반환(피드백 파이프라인의 집계 신호 입력). since_ts 의미는
+    list_retrieval_log와 동일."""
     conn = _conn()
-    rows = conn.execute(
-        "SELECT conv_id, turn_id, thumb, reason, ts FROM feedback").fetchall()
+    if since_ts is None:
+        rows = conn.execute(
+            "SELECT conv_id, turn_id, thumb, reason, ts FROM feedback").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT conv_id, turn_id, thumb, reason, ts FROM feedback WHERE ts >= ?",
+            (since_ts,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
