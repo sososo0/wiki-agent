@@ -646,3 +646,28 @@ WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
   반복되지만, 사이클별 eval 점수 추이와 승격/거부 통계를 누적해 위키가 실제로
   좋아지는지 보여주는 대시보드/기록은 아직 없음(현재 알림은 사이클 1회 단위 요약만
   보여줄 뿐 누적 추이는 아님) — 추가 예정.
+- **데이터 파이프라인 스케일링** — 위 마이닝 윈도우/거부 gap 기억/MCP 임베딩 캐시는
+  지금 규모(active 400여 엔트리, retrieval_log 수백~수천 행)에서는 충분하지만,
+  위키/로그가 훨씬 커지면 다시 손볼 지점들:
+  - **인덱스가 하나도 없음** — `sqlite_master`에 사용자 정의 인덱스가 0건. `wiki_entry.status`/
+    `updated_at`, `retrieval_log.ts`, `feedback.ts`가 전부 매번 풀스캔이라(방금 추가한
+    `since_ts` 윈도잉도 SQL 레벨에서는 여전히 전체 스캔), 행 수가 작아 안 보일 뿐
+    실제로 데이터가 커지면 가장 먼저 느려질 지점. `CREATE INDEX`만으로 해결되는
+    가장 작고 확실한 다음 수정.
+  - **`curate()` LLM 호출이 daily_cap에 묶여 있지 않음** — `gate.py`는 비용이 큰
+    grounding judge 호출을 daily_cap 뒤로 미뤄 잘 막지만, `scripts/run_update_cycle.py`의
+    gap 루프는 `gate.passes_gate()`를 부르기 *전에* 매 gap마다 무조건 `curate()`를
+    1회 호출한다 — 트래픽이 커져 한 사이클에 mine_gaps가 가령 50개 gap을 찾으면
+    daily_cap이 5만 허용해도 curate 호출은 50번 다 나간다.
+  - **임베딩 캐시가 무한히 자람** — `_search_embed_cache`(entry_id+version 키)는
+    엔트리가 버전업될 때마다 옛 버전 벡터를 영원히 들고 있다(evict 없음). 코퍼스가
+    크고 갱신이 잦아지면 오래 사는 프로세스(MCP 서버/데모)의 메모리가 천천히 늘어남
+    — LRU 캐시나 deprecated 엔트리 정리가 필요해질 수 있음.
+  - **retrieval_log/feedback/conversation_log에 retention 정책이 없음** — 마이닝은
+    윈도우로 막았지만 테이블 자체는 계속 자란다(디스크/백업 비용, 위 인덱스 부재와
+    겹치면 풀스캔 비용도 함께 누적).
+  - **mine_gaps의 "정확히 같은 문구 3번 이상"** — 트래픽이 커지면 같은 의미의 질문이
+    다양한 문구로 흩어져 탐지율이 떨어질 수 있음(지금은 의도된 단순화 — paraphrase
+    클러스터링은 스코프 밖).
+  - **SQLite 단일 파일 = 단일 writer** — 위 "멀티유저화" 항목과 같은 근본 원인,
+    동시 쓰기 트래픽이 커지면 거기서 막힌다.
