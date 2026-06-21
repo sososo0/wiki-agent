@@ -213,28 +213,39 @@ def generate(
     )
     resp = _anthropic_client().messages.create(
         model=model,
-        max_tokens=900,
+        max_tokens=1500,
         messages=[{"role": "user", "content": prompt}],
     )
     text = next((b.text for b in resp.content if b.type == "text"), "")
     try:
         data = json.loads(_extract_json_object(text))
-        if isinstance(data, dict) and data.get("type") == "clarify" and not force_answer:
+    except (json.JSONDecodeError, ValueError):
+        data = None
+
+    if isinstance(data, dict):
+        if data.get("type") == "clarify" and not force_answer:
             options = data.get("options") or []
             if data.get("question") and options:
                 return {"type": "clarify", "question": data["question"], "options": options}
-        if isinstance(data, dict) and "answer" in data:
+        if "answer" in data:
             return {
                 "type": "answer",
                 "answer": data["answer"],
                 "entry_ids_used": data.get("entry_ids_used") or [],
             }
-    except (json.JSONDecodeError, ValueError):
-        pass
-    # JSON이 깨졌을 때(보통 max_tokens 한도로 중간에 끊김) 잘린 중괄호/인용부호를
-    # 그대로 보여주는 대신, 복구 가능한 answer 텍스트를 우선 쓰고 그것도 없으면
-    # 명확한 안내 문구로 대체한다(clarify가 끊긴 경우도 동일하게 answer로 폴백 —
-    # 끊긴 명확화 질문을 보여주는 것보다 그게 더 안전함).
+        if data.get("type") == "clarify" and data.get("question"):
+            # force_answer=True인데도 모델이 지시를 어기고 clarify를 반환한 경우(haiku가
+            # "다시 묻지 마라"를 완벽히 따르지 않을 수 있음) — 다시 물어볼 수 없으니
+            # 그 질문/선택지를 그대로 버리고 "끊겼다"는 메시지로 대체하면 안 된다.
+            # 모델이 만들어낸 내용 자체는 멀쩩하므로 최선의 답변으로 재구성해 보여준다.
+            answer = data["question"]
+            if data.get("options"):
+                answer += "\n\n" + "\n".join(f"- {o}" for o in data["options"])
+            return {"type": "answer", "answer": answer, "entry_ids_used": [h["entry_id"] for h in hits]}
+
+    # JSON 파싱 자체가 실패했거나(보통 max_tokens 한도로 중간에 끊김) 위 분기 중
+    # 어디에도 해당하지 않는 경우 — 잘린 중괄호/인용부호를 그대로 보여주는 대신,
+    # 복구 가능한 answer 텍스트를 우선 쓰고 그것도 없으면 명확한 안내 문구로 대체한다.
     recovered = _recover_partial_answer(text)
     answer = recovered or "답변 생성이 길어져 응답이 끊겼습니다. 다시 질문해 주세요."
     return {"type": "answer", "answer": answer, "entry_ids_used": [h["entry_id"] for h in hits]}

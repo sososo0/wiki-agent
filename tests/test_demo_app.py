@@ -24,6 +24,27 @@ from core import retrieval, wiki_store
 from demo import app as demo_app
 
 
+def _fake_anthropic_client(response_text: str):
+    """generate()가 호출하는 _anthropic_client().messages.create(...)를 흉내내는
+    가짜 클라이언트 — 모델이 실제로 반환한 raw text를 그대로 흘려보내 JSON
+    파싱/폴백 로직을 LLM 호출 없이 검증할 수 있게 한다."""
+    class _Block:
+        type = "text"
+        text = response_text
+
+    class _Resp:
+        content = [_Block()]
+
+    class _Messages:
+        def create(self, **kwargs):
+            return _Resp()
+
+    class _Client:
+        messages = _Messages()
+
+    return _Client()
+
+
 def _stub_embed_fn(texts):
     return np.ones((len(texts), 4), dtype=float)
 
@@ -248,3 +269,49 @@ def test_chat_blocks_llm_call_when_per_conversation_budget_exhausted(client, mon
         "conv_id": "conv-other", "turn_id": 0, "message": "third question",
     })
     assert other.json()["answer"] == "stub answer"
+
+
+def test_generate_falls_back_to_answer_when_model_disobeys_force_answer(monkeypatch):
+    """실제로 발견된 버그의 회귀 테스트: force_answer=True인데도 모델이 (haiku가
+    "다시 묻지 마라" 지시를 완벽히 따르지 않아) clarify 모양 JSON을 반환하면,
+    그 내용을 버리고 "답변이 끊겼습니다"로 대체하던 게 원래 버그였다 — 사용자에게는
+    "답변이 끊기고 되묻기도 반영이 안 된다"는 증상 하나로 보였다. question/options를
+    답변으로 재구성해 보여줘야 한다."""
+    clarify_json = (
+        '{"type": "clarify", "question": "어떤 타임아웃을 말씀하시는 건가요?", '
+        '"options": ["connect timeout", "read timeout"]}'
+    )
+    monkeypatch.setattr(
+        demo_app, "_anthropic_client", lambda: _fake_anthropic_client(clarify_json),
+    )
+
+    result = demo_app.generate(
+        "타임아웃을 어떻게 설정해? — read timeout",
+        [{"entry_id": "wiki_1", "topic": "t", "canonical": "c"}],
+        force_answer=True,
+    )
+
+    assert result["type"] == "answer"
+    assert "어떤 타임아웃을 말씀하시는 건가요?" in result["answer"]
+    assert "connect timeout" in result["answer"]
+    assert result["entry_ids_used"] == ["wiki_1"]
+
+
+def test_generate_returns_clarify_when_model_asks_and_not_forced(monkeypatch):
+    clarify_json = (
+        '{"type": "clarify", "question": "어떤 타임아웃을 말씀하시는 건가요?", '
+        '"options": ["connect timeout", "read timeout"]}'
+    )
+    monkeypatch.setattr(
+        demo_app, "_anthropic_client", lambda: _fake_anthropic_client(clarify_json),
+    )
+
+    result = demo_app.generate(
+        "타임아웃을 어떻게 설정해?",
+        [{"entry_id": "wiki_1", "topic": "t", "canonical": "c"}],
+        force_answer=False,
+    )
+
+    assert result["type"] == "clarify"
+    assert result["question"] == "어떤 타임아웃을 말씀하시는 건가요?"
+    assert result["options"] == ["connect timeout", "read timeout"]
