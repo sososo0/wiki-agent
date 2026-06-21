@@ -476,13 +476,13 @@
     const data = await resp.json();
     typingEl.remove();
     if (data.type === "clarify") {
-      addClarifyMessage(data, turn, message);
+      addClarifyMessage(data, turn);
     } else {
       addBotMessage(data.answer, data.retrieved, turn, { progressive: true });
     }
   }
 
-  function addClarifyMessage(data, turn, originalQuestion) {
+  function addClarifyMessage(data, turn) {
     hideIntro();
     const div = document.createElement("div");
     div.className = "msg bot";
@@ -496,12 +496,15 @@
     const freeform = document.createElement("div");
     freeform.className = "clarify-freeform";
 
+    // 서버가 원본 질문(query)을 pending 상태로 들고 있으므로(demo/app.py의
+    // _pending_clarifications), 클라이언트는 더 이상 "원래 질문 — 선택"을
+    // 직접 조립하지 않고 사용자가 고른/입력한 답변만 보낸다.
     const resolve = (choiceText) => {
       optsWrap.remove();
       freeform.remove();
       addMessage("user", choiceText);
       const nextTurn = turnId++;
-      sendToChat(`${originalQuestion} — ${choiceText}`, nextTurn, true);
+      sendToChat(choiceText, nextTurn, true);
     };
 
     (data.options || []).forEach((opt) => {

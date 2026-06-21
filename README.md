@@ -347,12 +347,18 @@ docker run -d --name wiki-agent-demo \
 
 데모는 불특정 다수가 들어와 찍어볼 수 있는 공개 엔드포인트인데, 채팅 1턴마다
 Anthropic API(`claude-haiku-4-5`)를 호출하므로 **비용 부담** 때문에 호출 횟수
-자체를 두 단계로 캡핑한다(`demo/app.py`의 `_consume_call_budget`):
+자체를 세 단계로 캡핑한다(`demo/app.py`의 `_consume_call_budget`):
 
 | 환경변수 | 기본값 | 의미 |
 |---|---|---|
 | `WIKI_AGENT_DEMO_DAILY_CALL_LIMIT` | `50` | 프로세스 전체의 일일 LLM 호출 한도(날짜가 바뀌면 자동 리셋) |
-| `WIKI_AGENT_DEMO_PER_CONV_CALL_LIMIT` | `10` | 대화(conv_id) 1건이 쓸 수 있는 최대 호출 수(한 사용자가 예산을 독점하지 못하게) |
+| `WIKI_AGENT_DEMO_PER_CONV_CALL_LIMIT` | `10` | 대화(conv_id) 1건이 쓸 수 있는 최대 호출 수 |
+| `WIKI_AGENT_DEMO_PER_IP_DAILY_LIMIT` | `20` | IP 1개가 하루에 쓸 수 있는 최대 LLM 호출 수 |
+
+`conv_id`는 클라이언트가 `crypto.randomUUID()`로 만드는 값이라, 대화당 한도만
+있으면 공격자가 매 요청마다 새 `conv_id`를 보내는 것만으로 한도를 트리비얼하게
+우회할 수 있다 — IP 한도가 그 우회를 막는 실질적인 방어선이다(자세한 보안 설계는
+아래 "악의적/봇 트래픽 방어" 참고).
 
 한도에 도달하면 **Anthropic API를 호출하지 않고** "오늘 API 호출 한도에 도달해
 답변을 생성할 수 없습니다. 잠시 후 다시 시도해 주세요."를 그대로 응답한다.
@@ -360,6 +366,36 @@ Anthropic API(`claude-haiku-4-5`)를 호출하므로 **비용 부담** 때문에
 `retrieval_log`도 계속 쌓인다 — 막히는 건 LLM 호출(`generate`/`generate_title`)뿐이라
 gap 마이닝 신호는 끊기지 않는다. 카운터는 메모리에만 있어 서버를 재시작하면
 초기화된다(데모 규모에서는 DB까지 갈 필요가 없다고 판단).
+
+### 악의적/봇 트래픽 방어
+
+위 LLM 호출 한도 외에, 배포된 데모를 노린 남용을 막기 위한 별도 방어선
+(`demo/app.py`):
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `WIKI_AGENT_DEMO_BURST_LIMIT` | `8` | IP 1개가 `BURST_WINDOW_SECONDS` 동안 보낼 수 있는 최대 요청 수 |
+| `WIKI_AGENT_DEMO_BURST_WINDOW_SECONDS` | `10` | 위 버스트 한도의 슬라이딩 윈도우 길이(초) |
+| `WIKI_AGENT_DEMO_MAX_BODY_BYTES` | `20480`(20KB) | 이보다 큰 요청 본문은 파싱하지 않고 즉시 413 |
+| `WIKI_AGENT_DEMO_TRUST_PROXY` | `0` | `1`이면 `X-Forwarded-For`의 첫 IP를 신뢰. **리버스 프록시 뒤에 배포할 때만 켤 것** — 프록시가 없는데 켜면 누구나 그 헤더를 위조해 IP 기준 한도를 전부 우회할 수 있다 |
+
+버스트 한도는 `@app.middleware("http")`로 **모든 엔드포인트**(`/chat`뿐 아니라
+`/graph`/`/history`/`/conversations`까지)에 적용된다 — 검색·그래프 연산도 로컬
+임베딩/rerank 연산이라 서버 CPU 비용이 있어서, LLM 호출과 무관하게 짧은 시간에
+폭주하는 요청 자체를 막아야 한다. 차단된 요청은 `logging` 모듈로 stdout에
+남는다(남용 패턴 사후 확인용, 새 의존성 없음).
+
+`ChatRequest`/`FeedbackRequest`는 `pydantic.Field`로 길이/형식 제약을 둔다
+(`message` 1~2000자, `conv_id`는 UUID 형식, `turn_id` 0~100000) — 위반 시 FastAPI가
+자동으로 422를 반환한다. SQL 인젝션은 `core/wiki_store.py` 전체가 파라미터
+바인딩(`?`)을 쓰므로 원래부터 안전하다.
+
+**한계(이번 범위 밖)**: `/conversations`/`/history/{conv_id}`는 인증이 없어 누구나
+모든 사용자의 대화 미리보기를 볼 수 있다 — 단일 SQLite 파일 기반의 멀티유저
+미지원 한계(위 "로컬에서 데모 배포하기" 참고)의 연장선이라 이번 보안 작업
+범위에는 넣지 않았다. 고치려면 `conv_id` 생성 시 서버가 무작위 `owner_token`을
+같이 발급해 `conversation_meta`에 저장하고, 조회 시 그 토큰을 요구하는 방식이
+필요하다(데이터 모델 변경이 있는 별도 작업).
 
 ### 되묻기(clarify) + 피드백 이유
 
@@ -370,22 +406,20 @@ Question System([Permission and Question System | sst/opencode | DeepWiki](https
 실행을 멈추고 사용자의 선택(또는 직접 입력)을 받아 재개하는 패턴을 참고했다.
 **추가 LLM 호출 없이** 같은 1회 호출 안에서 `{"type": "answer", ...}` 또는
 `{"type": "clarify", "question", "options"}` 중 하나로 응답하므로 위 호출 한도와
-충돌하지 않는다. 사용자가 옵션을 고르면 "원래 질문 — 선택"을 합쳐 `force_answer:
-true`로 딱 1회 더 호출해 최종 답을 받는다(모호한 질문 1건당 최대 2회 호출로 상한).
+충돌하지 않는다.
 
-**한계 — 진짜 하네스가 아니라 비용 제약 때문에 가볍게 흉내낸 것이다.** opencode의
-Question System은 실행 자체가 멈춘다(`Deferred`가 실행 스레드를 블로킹하고, 서버가
-"명확화 대기 중" 상태와 원본 컨텍스트를 들고 있다가 `reply()`가 오면 같은 실행을
-이어간다). 우리는 그런 서버 측 pending 상태가 전혀 없다 — `clarify` 응답이 나가는
-순간 그 HTTP 요청은 완전히 끝나고, 사용자가 옵션을 고르면 **클라이언트가 "원래
-질문 — 선택"을 문자열로 직접 조립**해 완전히 새로운 `/chat` 요청을 보낼 뿐이다.
-서버는 그게 명확화에 대한 답인지조차 모른다. `conv_id`별로 원본 질문과 검색
-결과를 서버에 저장해두고 진짜로 이어받는 구조가 "정석"이지만, 그러려면 상태
-저장소(테이블 또는 메모리 dict)와 만료 처리가 추가로 필요하다 — 이미 호출 횟수
-자체를 비용 때문에 캡핑해둔 프로젝트 성격상, 상태 관리 복잡도까지 늘리는 것보다
-지금처럼 "모델이 한 번에 결정 + 클라이언트가 문자열을 이어붙이는" 가벼운 방식을
-택했다. 사용자 경험(되묻고 답 반영)은 비슷하게 재현되지만, 내부 구조는 진짜
-세션 일시정지/재개가 아니라는 점은 분명히 해둔다.
+**서버가 명확화 대기 상태를 들고 있는다(`demo/app.py`의 `_pending_clarifications`).**
+opencode의 Question System(실행 스레드를 `Deferred`로 블로킹하고 `reply()`가 오면
+같은 실행을 이어가는 구조)과 동일한 개념을, 우리의 stateless HTTP 구조에 맞게
+구현했다: `clarify` 응답이 나갈 때 서버가 `{"query": 원본 질문, "created_at": ...}`를
+`conv_id` 키로 메모리에 저장한다. 사용자가 옵션을 고르면 클라이언트는 **선택한
+텍스트만**(문자열 조합 없이) `force_answer: true`로 다시 `/chat`에 보내고, **서버가**
+저장해둔 원본 질문과 합쳐 검색·`generate(force_answer=True)`를 1회 더 호출한다
+(모호한 질문 1건당 최대 2회 호출로 상한 유지). pending 상태는 10분
+(`PENDING_CLARIFY_TTL_SECONDS`) 안에 답하지 않으면 만료되어 다음 메시지를 새
+질문으로 처리한다 — 진짜 실행 일시정지/재개는 아니지만(여전히 평범한 두 번의
+독립된 HTTP 요청이다), 컨텍스트의 출처가 클라이언트가 아니라 서버라는 점이
+이전 버전과의 핵심 차이다.
 
 👎 피드백은 클릭 즉시 전송하는 대신 짧은 이유 후보("근거 부족"/"주제와 무관"/
 "너무 추상적"/"사실과 다름"/"이유 없이 제출")를 보여주고 고른 이유와 함께
