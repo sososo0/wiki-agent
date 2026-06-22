@@ -40,7 +40,10 @@ serving/
 └── mcp_server.py        MCP stdio 서버 (search_wiki, submit_feedback만 노출)
 demo/                    MCP 외 진입점 — 사람이 직접 써보는 FastAPI 채팅 데모
 ├── app.py               search_wiki 검색 결과만 근거로 답변하는 고정 RAG 파이프라인
-└── static/index.html    빌드 단계 없는 채팅 UI(순수 HTML+JS)
+└── static/
+    ├── index.html       빌드 단계 없는 채팅 UI(순수 HTML+JS)
+    ├── graph.html       위키 엔트리/관계 그래프 시각화
+    └── history.html     갱신 사이클별 골드셋 지표 추이(표 + canvas 차트)
 scripts/
 ├── run_update_cycle.py  피드백 파이프라인 1사이클 오케스트레이션
 └── ingest_doc.py        문서 ingestion 파이프라인 오케스트레이션(parse→chunk→curate→gate→shadow→promote)
@@ -97,6 +100,13 @@ docker run -d --name wiki-agent-demo \
 `-v` 볼륨 마운트 없이 실행하면 컨테이너 종료 시 DB도 함께 삭제. 이후 같은 DB로
 갱신 사이클을 돌리려면 컨테이너 밖에서 `WIKI_AGENT_DB=/tmp/wiki-agent-docker-data/wiki_agent.db`로
 같은 파일을 지정(아래 "위키 자가 갱신 확인하기" 참고).
+
+**경량화**: `Dockerfile`은 builder/runtime 2단계로 나눠 builder에서만 의존성
+설치+모델 프리캐시를 하고 최종 이미지에는 결과물(site-packages, 모델 캐시)만
+복사한다 — pip 자체 캐시나 빌드 중간 산물은 최종 이미지에 남지 않음. 측정
+결과(같은 머신, 같은 requirements.txt 기준 전/후 비교): **5.61GB → 1.57GB
+(-72%)**. 검색/rerank에 쓰는 모델(`all-MiniLM-L6-v2`, `ms-marco-MiniLM-L-6-v2`)은
+그대로라 검색 정확도(recall@k 등)에는 영향 없음.
 
 ## 위키 자가 갱신 확인하기 (LLM Wiki + RAG 결합 데모)
 
@@ -215,6 +225,7 @@ shadow→eval→promote 경로를 탐).
 | 위키 그래프 시각화 | 데모 실행 후 브라우저에서 `/static/graph.html` 접속 (`GET /graph`로 원본 JSON 확인 가능) |
 | 데모 Docker 빌드/실행 | `docker build -t wiki-agent-demo .` 후 `docker run ...` |
 | 갱신 사이클 알림 확인 | 데모 실행 후 헤더의 🔔 아이콘 클릭 (`GET /notifications`로 원본 JSON 확인 가능) |
+| 갱신 사이클 추이 확인 | 데모 실행 후 브라우저에서 `/static/history.html` 접속 (`GET /cycle-history`로 원본 JSON 확인 가능) |
 | 사이클 자동 실행 상태 확인 | `hermes cron status` / `hermes cron list` (설정은 [docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md) Step 6) |
 
 ### 서빙 로직 검증
@@ -267,6 +278,38 @@ groundedness(근거 충실도)/completeness(필수 포인트 커버리지)/relev
 python eval/run_eval.py --qualitative                              # rubric 평균만 stdout에 출력
 python eval/run_eval.py --qualitative --qualitative-report out.json # 질문별 점수+rationale도 저장
 ```
+
+### 평가가 점검하는 4가지와 그 근거
+
+"어떤 기준으로 문서가 검색/저장되는지, 실제로 답변에 유의미하게 쓰이는지"를 점검할 때
+보통 떠올리는 4가지 질문과, 이 프로젝트가 그걸 각각 어떻게 측정하는지 1:1로 정리하면:
+
+| 점검 | 측정 위치 | 현재 수치(k=5, 골드셋 58문항) |
+|---|---|---|
+| 1. 어떤 질문에 어떤 문서가 검색됐는지 | `eval/run_eval.py`의 `recall@k`/`mrr` — 검색된 top-k에 `gold_entry_ids`가 들어있는지(recall), 몇 번째 순위에 처음 나오는지(mrr) | recall@k 0.98 / mrr 0.78 |
+| 2. 그 문서가 실제 답변에 쓰였는지 | `demo/app.py`의 `generate()`가 반환하는 `entry_ids_used`(LLM이 실제로 인용한 entry_id만, "검색됐다"≠"인용했다") | 매 턴 `conversation_log.retrieved`에 기록(아래 한계 참고) |
+| 3. 답변이 기대 내용과 맞는지 | `judge_answer()`의 binary correctness + `--qualitative`의 groundedness/completeness/relevance 1-5 rubric | correctness 0.89 |
+| 4. 문서가 많아져도 검색이 잘 되는지 | 코퍼스가 seed 5개 → 109개 → 현재 active 402개로 늘었는데도 baseline 유지. `promote.promote_if_better()`가 매 갱신마다 골드셋 기준으로 회귀를 재확인 | recall@k 0.98 유지(80배 성장에도) |
+
+**한계 — 2번은 측정만 하고 교차검증하지 않는다.** `entry_ids_used`는 매 턴 기록되지만,
+`eval/run_eval.py`는 "검색된 문서 중 실제로 인용된 비율"을 별도 지표로 계산하지는
+않는다 — 지금은 "검색이 됐는가"(recall@k)와 "답이 맞는가"(correctness)만 본다. 이
+교차검증(검색은 됐는데 한 번도 인용 안 되는 문서가 있는지)은 코드 변경 없이
+한계로만 남겨둠.
+
+**4번의 실제 사례 — 코퍼스를 늘리려다 게이트가 막은 적이 있다.** 2026-06-23에
+`data/corpus/`에 신규 주제 3개(graceful-degradation, api-rate-limit-design,
+queue-based-load-leveling, 총 60개 청크)를 `scripts/ingest_doc.py`로 추가
+ingestion했는데, 매번 `promote_if_better`가 회귀로 판정해 active 승격을 막았다:
+새 콘텐츠의 캐시/TTL 관련 어휘가 골드셋의 unanswerable 문항(예: CDN 캐시 무효화)과
+겹쳐 "모른다"고 답해야 할 질문에 그럴듯한 오답을 내도록 만들었기 때문
+(`escalation_correctness` 하락). `--k`를 5→8로 올리면 `recall@k`는 회복되지만
+`escalation_correctness`는 더 떨어지는 트레이드오프만 확인됐다 — 즉 단순 파라미터
+조정으로 해결되지 않는 실제 회귀였고, 그래서 강제 승격 없이 60개 엔트리 모두
+`shadow` 상태로만 남겼다(active 402개는 그대로 보존). "코퍼스가 커져도 검색이
+잘 되는가"라는 질문에 대한 가장 솔직한 답은 숫자 하나가 아니라 이 게이트가 실제로
+작동해 나쁜 확장을 막아낸 사례 자체다 — `/static/graph.html`에서 이 60개 엔트리가
+`shadow`(승격 대기) 상태로 떠 있는 것을 직접 확인할 수 있다.
 
 ### 에이전틱 태스크 평가(진단용)
 
@@ -505,9 +548,29 @@ wiki_store.add_notification('warning', '테스트 알림', '확인용 메시지'
 "
 ```
 
-**한계**: 사이클 1회 단위 요약만 보여줄 뿐, 여러 사이클에 걸친 누적 추이(예: eval
-점수가 시간이 지나며 개선되는지)는 보여주지 않는다 — 위 "현재 상태 → 구현 예정"의
-"여러 사이클에 걸친 효과 증명" 참고.
+**한계**: 알림은 사이클 1회 단위 요약 텍스트만 보여줄 뿐, 그 안의 숫자(recall@k 등)는
+구조화된 형태로 남지 않았다 — 아래 "갱신 사이클 추이"가 이 부분을 보완한다.
+
+### 갱신 사이클 추이(📈)
+
+알림(🔔)이 사이클 1건의 텍스트 요약이라면, `cycle_history` 테이블은 사이클마다
+"그 시점에 실제로 active인 위키 상태"의 골드셋 지표(recall@k/mrr/correctness/
+escalation_correctness)를 구조화된 행으로 남긴다(`scripts/run_update_cycle.py`의
+`run_cycle()`이 `promote_if_better()` 직후 기록 — 승격됐으면 candidate, 안 됐으면
+base 지표를 저장해 "지금 active 상태"를 정확히 반영). "대화 로그가 위키를 스스로
+갱신한다"는 서사가 실제로 검색 품질을 개선(또는 최소한 퇴화시키지 않음)하는지를
+숫자로 누적해서 보여주는 게 목적.
+
+```bash
+WIKI_AGENT_DB=/tmp/demo.db python scripts/run_update_cycle.py   # 사이클마다 1행씩 쌓임
+```
+
+- `GET /cycle-history` → `{"cycles": [{ts, mined, shadow_count, promoted, activated_count, recall_at_k, mrr, correctness, escalation_correctness}, ...]}`(시간순)
+- `/static/history.html`에서 표 + recall@k/mrr/correctness 추이를 순수 `<canvas>` 차트로 확인(새 라이브러리 추가 없음)
+
+**한계**: 사이클이 1개뿐이면 추이를 그릴 수 없다(차트는 "사이클 2개 이상 필요" 안내로
+대체). retention 정책이 없어 테이블이 무한히 쌓이는 건 다른 로그 테이블과 동일한
+한계(위 "데이터 파이프라인 스케일링" 참고).
 
 ### 위키 그래프 시각화
 
@@ -632,6 +695,13 @@ WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
   읽기/읽음처리만 노출하고(쓰기는 오직 `run_update_cycle.py`), 헤더의 🔔 아이콘이
   안 읽은 개수를 배지로 보여주며 60초 폴링으로 갱신한다. (`core/wiki_store.py`,
   `scripts/run_update_cycle.py`, `demo/`)
+- **갱신 사이클 추이(📈)** — 알림이 사이클 1건의 텍스트 요약만 보여주던 한계를
+  보완. `cycle_history` 테이블에 사이클마다 "지금 active 상태"의 골드셋 지표
+  (recall@k/mrr/correctness/escalation_correctness)를 구조화된 행으로 남기고,
+  `GET /cycle-history`/`/static/history.html`이 시간순 표와 순수 `<canvas>` 추이
+  차트로 보여준다(새 차트 라이브러리 추가 없음). 위 "여러 사이클에 걸친 효과 증명"
+  요구를 처음으로 숫자로 답함. (`core/wiki_store.py`, `scripts/run_update_cycle.py`,
+  `demo/app.py`, `demo/static/history.html`)
 
 **구현 예정**
 
@@ -642,10 +712,6 @@ WIKI_AGENT_DB=/tmp/demo.db uvicorn demo.app:app --reload
   IP/대화 기준 rate limiting은 이미 적용됐지만(위 "악의적/봇 트래픽 방어" 참고),
   Postgres 전환·`/conversations`·`/history` 인증(`owner_token`)·시크릿 분리(vault 등)는
   계획 중.
-- **여러 사이클에 걸친 효과 증명** — Hermes cron으로 사이클은 이제 매일 자동
-  반복되지만, 사이클별 eval 점수 추이와 승격/거부 통계를 누적해 위키가 실제로
-  좋아지는지 보여주는 대시보드/기록은 아직 없음(현재 알림은 사이클 1회 단위 요약만
-  보여줄 뿐 누적 추이는 아님) — 추가 예정.
 - **데이터 파이프라인 스케일링** — 위 마이닝 윈도우/거부 gap 기억/MCP 임베딩 캐시는
   지금 규모(active 400여 엔트리, retrieval_log 수백~수천 행)에서는 충분하지만,
   위키/로그가 훨씬 커지면 다시 손볼 지점들:

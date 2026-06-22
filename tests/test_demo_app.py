@@ -475,6 +475,28 @@ def test_notifications_endpoint_lists_unread_count(client):
     assert body["notifications"][0]["title"] == "회귀로 승격 차단됨"  # 최신순
 
 
+def test_cycle_history_endpoint_lists_rows_in_chronological_order(client):
+    """cycle_history도 notifications와 같은 이유로 신뢰된 오프라인 스크립트만
+    쓰고 GET /cycle-history는 읽기만 한다 — 단, 추이 차트용이라 최신순이 아니라
+    시간순(ts ASC)으로 나와야 한다."""
+    wiki_store.add_cycle_history(
+        mined=1, shadow_count=1, promoted=False, activated_count=0,
+        recall_at_k=0.5, mrr=0.4, correctness=0.3,
+    )
+    wiki_store.add_cycle_history(
+        mined=2, shadow_count=1, promoted=True, activated_count=1,
+        recall_at_k=0.9, mrr=0.8, correctness=0.7, escalation_correctness=1.0,
+    )
+
+    resp = client.get("/cycle-history")
+    assert resp.status_code == 200
+    cycles = resp.json()["cycles"]
+    assert len(cycles) == 2
+    assert cycles[0]["recall_at_k"] == 0.5  # 시간순 첫 번째
+    assert cycles[1]["promoted"] == 1
+    assert cycles[1]["escalation_correctness"] == 1.0
+
+
 def test_notifications_mark_read_decrements_unread_count(client):
     wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
     notif_id = wiki_store.list_notifications()[0]["id"]

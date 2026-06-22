@@ -302,7 +302,10 @@ def generate(
         '{"type": "answer", "answer": "<질문에 대한 한국어 답변, 마크다운 가능>", '
         '"entry_ids_used": ["<실제로 답변에서 인용한 entry_id만, 없으면 빈 배열>"]} '
         'or {"type": "clarify", "question": "<한국어로 된 명확화 질문>", '
-        '"options": ["<선택지 1>", "<선택지 2>", "..."]} (2-4개 선택지)'
+        '"options": ["<선택지를 한국어 문장으로 작성. 기술 고유명사(token bucket, '
+        'connection pool 등)는 영어 표기를 유지하되, 위키 entry의 topic을 영어 '
+        '그대로 복사하지 말고 짧은 한국어 설명을 덧붙일 것 — 예: \'Rate limiting '
+        '(요청 빈도 제한)\'>", "..."]} (2-4개 선택지)'
     )
     resp = _anthropic_client().messages.create(
         model=model,
@@ -501,6 +504,14 @@ def conversations():
     패널이 conv_id 하나만 기억하는 대신 과거 대화 전체를 보여줄 수 있게 한다
     (읽기 전용, conversation_log 집계만)."""
     return {"conversations": wiki_store.list_conversations()}
+
+
+@app.get("/cycle-history")
+def cycle_history():
+    """갱신 사이클별 골드셋 지표 추이(GET) — 읽기 전용(cycle_history 테이블에
+    쓰는 건 scripts/run_update_cycle.py뿐, 데모 서빙 경로는 안 씀). 시간순으로
+    반환되므로 프런트는 그대로 차트에 꽂으면 됨."""
+    return {"cycles": wiki_store.list_cycle_history()}
 
 
 @app.get("/notifications")

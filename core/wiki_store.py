@@ -81,6 +81,23 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at  REAL,
   read        INTEGER DEFAULT 0
 );
+
+-- 사이클(scripts/run_update_cycle.py)마다 1행 — promote.promote_if_better()가
+-- 본 "지금 active 상태"의 골드셋 지표를 시계열로 쌓아, 여러 사이클에 걸쳐 위키가
+-- 실제로 좋아지는지(혹은 안 좋아지는지) 추이로 보여준다. notifications와 같은
+-- 이유로 KB(wiki_entry)와 무관한 운영 데이터.
+CREATE TABLE IF NOT EXISTS cycle_history (
+  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                      REAL NOT NULL,
+  mined                   INTEGER,
+  shadow_count            INTEGER,
+  promoted                INTEGER,   -- 0 | 1
+  activated_count         INTEGER,
+  recall_at_k             REAL,
+  mrr                     REAL,
+  correctness             REAL,
+  escalation_correctness  REAL       -- NULL 가능(골드셋에 unanswerable 문항이 없으면)
+);
 """
 
 SEED_ENTRIES = [
@@ -460,6 +477,42 @@ def mark_notification_read(notification_id: int) -> None:
         "UPDATE notifications SET read = 1 WHERE id = ?", (notification_id,))
     conn.commit()
     conn.close()
+
+
+def add_cycle_history(
+    mined: int, shadow_count: int, promoted: bool, activated_count: int,
+    recall_at_k: float, mrr: float, correctness: float,
+    escalation_correctness: float = None, *, conn=None,
+) -> None:
+    """갱신 사이클(scripts/run_update_cycle.py) 1회 실행 후의 골드셋 지표 1행을
+    기록 — promoted면 candidate(새로 active가 된 상태), 아니면 base(그대로인 현재
+    active 상태)의 지표를 넘겨받는다(호출부 책임). 데모의 "사이클 추이" 페이지
+    (GET /cycle-history)가 시계열로 보여줌."""
+    own = conn is None
+    conn = conn or _conn()
+    conn.execute(
+        """INSERT INTO cycle_history
+           (ts, mined, shadow_count, promoted, activated_count,
+            recall_at_k, mrr, correctness, escalation_correctness)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (time.time(), mined, shadow_count, int(promoted), activated_count,
+         recall_at_k, mrr, correctness, escalation_correctness))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+def list_cycle_history(limit: int = 100) -> List[Dict[str, Any]]:
+    """시간순(ts ASC)으로 반환 — list_notifications()는 최신순 피드용이라 DESC인
+    것과 의도적으로 다름. 추이 차트는 과거->현재 순서로 그려야 자연스럽다."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT id, ts, mined, shadow_count, promoted, activated_count,
+                  recall_at_k, mrr, correctness, escalation_correctness
+           FROM cycle_history ORDER BY ts ASC LIMIT ?""",
+        (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 if __name__ == "__main__":

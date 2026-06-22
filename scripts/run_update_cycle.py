@@ -159,6 +159,26 @@ def run_cycle(
     gold = load_gold(gold_path or GOLD_PATH)
     summary["promote"] = promote.promote_if_better(gold, k=k, evaluate_fn=evaluate_fn)
 
+    # cycle_history에 "지금 active 상태"의 골드셋 지표 1행을 남긴다 — 승격됐으면
+    # candidate(=새로 active가 된 상태), 안 됐으면 base(=그대로인 현재 active
+    # 상태)가 곧 지금의 실제 품질이다. 여러 사이클에 걸친 추이를 보려면 이 값들이
+    # 쌓여야 하는데, 지금까지는 notifications에 텍스트 요약만 남고 구조화된
+    # 히스토리가 없었다.
+    promote_result = summary["promote"]
+    metrics_src = (
+        promote_result["candidate"] if promote_result["promoted"] else promote_result["base"]
+    )
+    wiki_store.add_cycle_history(
+        mined=summary["mined"],
+        shadow_count=len(summary["shadow_written"]),
+        promoted=promote_result["promoted"],
+        activated_count=len(promote_result["activated_entry_ids"]),
+        recall_at_k=metrics_src["recall@k"],
+        mrr=metrics_src["mrr"],
+        correctness=metrics_src["correctness"],
+        escalation_correctness=metrics_src.get("escalation_correctness"),
+    )
+
     # 로그 텍스트를 나중에 파싱하는 대신, 이미 들고 있는 구조화된 summary에서
     # 바로 알림을 만든다 — 데모의 종모양 알림 UI(GET /notifications)가 읽음.
     notifications = summary_notifications(summary)

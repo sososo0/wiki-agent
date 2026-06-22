@@ -96,6 +96,35 @@ def test_run_cycle_creates_shadow_for_good_patch_and_blocks_bad_patch(tmp_path, 
     assert "warning" in levels
 
 
+def test_run_cycle_records_cycle_history_row(tmp_path, monkeypatch):
+    """사이클마다 cycle_history에 1행씩 쌓여야 누적 추이 페이지(/cycle-history)가
+    동작한다. 이 stub에서는 promote가 항상 회귀로 보고하므로(promoted=False),
+    저장되는 지표는 candidate가 아니라 base여야 한다."""
+    db_path = str(tmp_path / "test_run_cycle_history_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    _seed_retrieval_log(PASSWORD_QUERY, n=4, score=-5.0)
+
+    result = run_cycle(
+        gold_path=None, k=5,
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+
+    history = wiki_store.list_cycle_history()
+    assert len(history) == 1
+    row = history[0]
+    assert row["mined"] == result["mined"]
+    assert row["shadow_count"] == len(result["shadow_written"])
+    assert row["promoted"] == 0
+    assert row["activated_count"] == 0
+    base = result["promote"]["base"]
+    assert row["recall_at_k"] == base["recall@k"]
+    assert row["mrr"] == base["mrr"]
+    assert row["correctness"] == base["correctness"]
+
+
 def test_run_cycle_window_days_excludes_old_log_rows(tmp_path, monkeypatch):
     """retrieval_log에 윈도우 밖(예: 30일 전)의 오래된 행만 있으면 기본 window_days로는
     gap이 마이닝되면 안 된다 — window_days=None(전체 히스토리)을 주면 다시 잡혀야 함.

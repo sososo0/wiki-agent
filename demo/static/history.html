@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>wiki-agent 사이클 추이</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 0; color: #1f2937; }
+  header { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 16px; }
+  header h2 { margin: 0; font-size: 18px; }
+  header a { color: #2563eb; text-decoration: none; }
+  #info {
+    border-bottom: 1px solid #e2e8f0; padding: 16px 20px; background: #f8fafc;
+    font-size: 13px; color: #374151; line-height: 1.6;
+  }
+  #info p { margin: 0; max-width: 760px; }
+  #content { padding: 20px; max-width: 900px; }
+  #empty-hint { color: #94a3b8; }
+  .legend { display: flex; gap: 18px; font-size: 12px; color: #64748b; margin-bottom: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 14px; height: 3px; display: inline-block; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 20px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f1f5f9; }
+  th { color: #64748b; font-size: 11px; text-transform: uppercase; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .promoted-yes { color: #16a34a; }
+  .promoted-no { color: #94a3b8; }
+</style>
+</head>
+<body>
+<header>
+  <h2>wiki-agent 사이클 추이</h2>
+  <a href="/">← 채팅으로</a>
+  <a href="/static/graph.html">📊 그래프 보기</a>
+</header>
+<div id="info">
+  <p>
+    갱신 사이클(<code>scripts/run_update_cycle.py</code>)이 돌 때마다, 그 시점에
+    실제로 active인 위키 상태가 골드셋 기준으로 얼마나 좋은지(recall@k/mrr/
+    correctness/escalation_correctness)를 한 행씩 기록합니다. "대화 로그가 위키를
+    스스로 갱신한다"는 이 프로젝트의 핵심 서사가 실제로 검색 품질을 개선(혹은
+    적어도 퇴화시키지 않음)하는지를 여러 사이클에 걸쳐 눈으로 확인할 수 있습니다.
+  </p>
+</div>
+<div id="content">
+  <div id="chart-wrap">
+    <div class="legend">
+      <span><span class="swatch" style="background:#2563eb"></span>recall@k</span>
+      <span><span class="swatch" style="background:#16a34a"></span>correctness</span>
+      <span><span class="swatch" style="background:#f59e0b"></span>mrr</span>
+    </div>
+    <canvas id="chart" width="860" height="220"></canvas>
+  </div>
+  <table id="table">
+    <thead>
+      <tr>
+        <th>시각</th><th>gap</th><th>shadow</th><th>승격</th>
+        <th>recall@k</th><th>mrr</th><th>correctness</th><th>escalation</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <p id="empty-hint" style="display:none">아직 기록된 사이클이 없습니다. 갱신 사이클을 1회 이상 실행하면 여기 쌓입니다.</p>
+</div>
+
+<script>
+  function fmtTime(ts) {
+    if (!ts) return "";
+    return new Date(ts * 1000).toLocaleString("ko-KR", {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    });
+  }
+
+  function drawChart(canvas, cycles) {
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    const pad = 30;
+    ctx.clearRect(0, 0, w, h);
+
+    if (cycles.length < 2) {
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "13px system-ui";
+      ctx.fillText("추이를 그리려면 사이클이 2개 이상 필요합니다.", pad, h / 2);
+      return;
+    }
+
+    // y축 0~1 그리드(메트릭이 전부 0~1 범위라 고정 스케일로 충분).
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "11px system-ui";
+    for (let i = 0; i <= 4; i++) {
+      const y = pad + (h - 2 * pad) * (1 - i / 4);
+      ctx.beginPath();
+      ctx.moveTo(pad, y);
+      ctx.lineTo(w - pad, y);
+      ctx.stroke();
+      ctx.fillText((i / 4).toFixed(2), 2, y + 3);
+    }
+
+    const xStep = (w - 2 * pad) / (cycles.length - 1);
+    const yOf = (v) => pad + (h - 2 * pad) * (1 - Math.max(0, Math.min(1, v ?? 0)));
+
+    function line(key, color) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      cycles.forEach((c, i) => {
+        const x = pad + i * xStep;
+        const y = yOf(c[key]);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    line("recall_at_k", "#2563eb");
+    line("correctness", "#16a34a");
+    line("mrr", "#f59e0b");
+  }
+
+  function renderTable(cycles) {
+    const tbody = document.querySelector("#table tbody");
+    tbody.innerHTML = "";
+    for (const c of cycles) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${fmtTime(c.ts)}</td>
+        <td class="num">${c.mined}</td>
+        <td class="num">${c.shadow_count}</td>
+        <td class="${c.promoted ? "promoted-yes" : "promoted-no"}">${c.promoted ? "✅" : "—"}</td>
+        <td class="num">${(c.recall_at_k ?? 0).toFixed(3)}</td>
+        <td class="num">${(c.mrr ?? 0).toFixed(3)}</td>
+        <td class="num">${(c.correctness ?? 0).toFixed(3)}</td>
+        <td class="num">${c.escalation_correctness == null ? "—" : c.escalation_correctness.toFixed(3)}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function main() {
+    const resp = await fetch("/cycle-history");
+    const data = await resp.json();
+    const cycles = data.cycles || [];
+
+    if (!cycles.length) {
+      document.getElementById("chart-wrap").style.display = "none";
+      document.getElementById("table").style.display = "none";
+      document.getElementById("empty-hint").style.display = "";
+      return;
+    }
+
+    drawChart(document.getElementById("chart"), cycles);
+    renderTable(cycles);
+  }
+
+  main();
+</script>
+</body>
+</html>

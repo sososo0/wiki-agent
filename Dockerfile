@@ -1,6 +1,15 @@
-FROM python:3.11-slim
+# ---- builder: 의존성 설치 + 모델 프리캐시 ----
+# 최종 이미지에는 여기서 만든 site-packages/모델 캐시만 복사하고, pip 자체의
+# 캐시/메타데이터·apt 목록 같은 빌드 전용 부산물은 가져가지 않는다.
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
+
+# torch는 sentence-transformers(core/retrieval.py의 로컬 임베딩/rerank)의
+# 의존성인데, 기본 pip 인덱스는 GPU(CUDA) 포함 빌드를 받아온다 — 이 데모 서버는
+# GPU가 없으므로 수백 MB~GB의 순수 낭비. CPU-only wheel을 먼저 박아두면 이후
+# requirements.txt 설치 시 이미 호환 버전이 깔려 있다고 보고 재설치하지 않는다.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -10,6 +19,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; \
 SentenceTransformer('all-MiniLM-L6-v2'); \
 CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+
+# ---- runtime: builder의 결과물만 가져온 깨끗한 이미지 ----
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder /root/.cache /root/.cache
 
 COPY . .
 
