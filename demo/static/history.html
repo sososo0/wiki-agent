@@ -85,18 +85,38 @@
   #toolbar button:hover { background: #f1f5f9; }
   #page-size-wrap { font-size: 12px; color: #64748b; display: flex; align-items: center; gap: 6px; }
   #page-size-wrap select { font-size: 12px; padding: 2px 4px; }
-  /* 컬럼이 많은 표는 좁은 화면에서 줄바꿈 대신 가로 스크롤로 — 칸을 숨기거나
-     재배치하지 않는 가장 단순하고 안전한 방법. */
+  /* 표는 글자/패딩을 줄여가며 화면 폭에 맞춰 같이 작아지다가, min-width
+     바닥(420px)에 닿으면 그 밑으론 더 줄이지 않고 #table-wrap이 가로
+     스크롤을 보여준다 — 처음부터 스크롤바를 띄우는 대신 줄어들 수 있는
+     만큼은 먼저 줄어드는 단계를 거친다. */
   #table-wrap { overflow-x: auto; }
+  table { min-width: 480px; }
   /* 캔버스는 내부 해상도(width/height 속성)는 그대로 두고 CSS로만 비율 유지
      축소 — 리사이즈 시 재드로우는 안 해서 약간 흐려질 수 있지만 데모 규모에는
      충분하고, 가로 스크롤/잘림은 막아준다. */
   #chart, #detail-panel canvas { max-width: 100%; height: auto; }
 
   @media (max-width: 860px) {
-    #page-wrap { flex-direction: column; }
+    /* 기본 align-items:flex-start는 가로 배치(행) 기준으로 정한 값인데,
+       column 방향에서는 cross-axis(=가로축) 정렬이 되어 #content가 자기
+       내용(표)의 자연스러운 너비만큼 늘어나 버린다(표가 줄어들지 않는 진짜
+       원인) — stretch로 바꿔 뷰포트 너비에 맞게 눌러준다. */
+    #page-wrap { flex-direction: column; align-items: stretch; }
     #detail-panel { width: 100%; position: static; }
     #toolbar { flex-wrap: wrap; }
+    table { font-size: 12px; }
+    th, td { padding: 5px 6px; }
+    tr.filter-row th { padding: 3px 6px; }
+    tr.filter-row input, tr.filter-row select { font-size: 11px; padding: 2px 4px; }
+    /* 시작~종료 두 날짜 입력이 나란히 있으면 그 칸 하나가 210px를 고정으로
+       먹어 표 전체가 못 줄어드는 가장 큰 원인이 된다 — 세로로 쌓아 그 칸의
+       최소 너비를 한 입력분(~110px)으로 줄인다. */
+    th.date-range-filter { flex-direction: column; align-items: stretch; min-width: 110px; gap: 2px; }
+    th.date-range-filter .range-sep { display: none; }
+  }
+  @media (max-width: 600px) {
+    table { font-size: 11px; }
+    th, td { padding: 4px 4px; }
   }
   #column-legend { display: none; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 12px; color: #374151; line-height: 1.6; }
   #column-legend dt { font-weight: 600; color: #1f2937; }
