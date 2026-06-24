@@ -13,7 +13,25 @@
     font-size: 13px; color: #374151; line-height: 1.6;
   }
   #info p { margin: 0; max-width: 760px; }
-  #content { padding: 20px; max-width: 900px; }
+  #page-wrap { display: flex; align-items: flex-start; gap: 20px; padding: 20px; }
+  #content { flex: 1; min-width: 0; max-width: 900px; }
+  /* 표 옆의 빈 공간을 활용 — 사이클을 클릭하면 여기에 설명이 뜬다. */
+  #detail-panel {
+    width: 280px; flex-shrink: 0; border: 1px solid #e2e8f0; border-radius: 8px;
+    padding: 14px 16px; background: #f8fafc; font-size: 13px; color: #374151;
+    line-height: 1.6; position: sticky; top: 20px;
+  }
+  #detail-panel h4 { margin: 0 0 8px; font-size: 13px; }
+  #detail-panel p { margin: 0 0 8px; }
+  #detail-panel #detail-hint { color: #94a3b8; margin: 0; }
+  .detail-close {
+    float: right; border: none; background: none; color: #94a3b8;
+    font-size: 12px; cursor: pointer; padding: 0;
+  }
+  .detail-close:hover { color: #374151; }
+  tr.cycle-row { cursor: pointer; }
+  tr.cycle-row:hover { background: #f8fafc; }
+  tr.cycle-row.selected { background: #eff6ff; }
   #empty-hint { color: #94a3b8; }
   .legend { display: flex; gap: 18px; font-size: 12px; color: #64748b; margin-bottom: 8px; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -86,6 +104,7 @@
     </dd>
   </dl>
 </div>
+<div id="page-wrap">
 <div id="content">
   <div id="chart-wrap">
     <div class="legend">
@@ -141,6 +160,10 @@
   </table>
   <p id="empty-hint" style="display:none">아직 기록된 사이클이 없습니다. 갱신 사이클을 1회 이상 실행하면 여기 쌓입니다.</p>
   <p id="no-match-hint" style="display:none; color:#94a3b8;">필터에 맞는 사이클이 없습니다.</p>
+</div>
+<div id="detail-panel">
+  <p id="detail-hint">표에서 사이클(행)을 클릭하면 여기에 설명이 표시됩니다.</p>
+</div>
 </div>
 
 <script>
@@ -212,11 +235,89 @@
     };
   }
 
-  function renderTable(rows) {
+  // 클릭한 사이클의 원본 숫자를 자연어 문장으로 풀어준다 — 표 칸의 숫자만으로는
+  // "그래서 이 사이클에 무슨 일이 있었는지"가 한눈에 안 들어오기 때문.
+  // prevCycle을 주면(표에 보이는 바로 위 행) 직전 사이클과 비교한 변화도 덧붙인다.
+  function describeCycle(c, prevCycle) {
+    const fmt3 = (v) => (v == null ? "—" : v.toFixed(3));
+    const lines = [];
+
+    lines.push(`gap ${c.mined}개를 마이닝해 shadow 후보 ${c.shadow_count}개를 새로 반영했습니다.`);
+
+    if (c.shadow_count > 0) {
+      lines.push(c.promoted
+        ? "골드셋 평가에서 회귀가 없어 active로 승격됐습니다."
+        : "골드셋 평가에서 회귀(recall@k/correctness 하락 등)가 감지되어 승격되지 않고 shadow로 남았습니다.");
+    } else {
+      lines.push("이 사이클에서는 새로 만든 shadow 후보가 없었습니다.");
+    }
+
+    lines.push(
+      `그 시점 골드셋 점수 — recall@k ${fmt3(c.recall_at_k)}, mrr ${fmt3(c.mrr)}, ` +
+      `correctness ${fmt3(c.correctness)}, escalation ${fmt3(c.escalation_correctness)}.`
+    );
+
+    if (prevCycle) {
+      const fields = [
+        ["recall@k", "recall_at_k"], ["mrr", "mrr"],
+        ["correctness", "correctness"], ["escalation", "escalation_correctness"],
+      ];
+      const deltas = [];
+      for (const [label, key] of fields) {
+        if (c[key] == null || prevCycle[key] == null) continue;
+        const diff = c[key] - prevCycle[key];
+        if (Math.abs(diff) < 0.0005) continue;
+        deltas.push(`${label} ${diff > 0 ? "+" : ""}${diff.toFixed(3)}`);
+      }
+      lines.push(deltas.length
+        ? `바로 위 사이클(${fmtTime(prevCycle.ts)}) 대비: ${deltas.join(", ")}.`
+        : `바로 위 사이클과 비교해 골드셋 점수 변화는 거의 없습니다.`);
+    }
+
+    return lines;
+  }
+
+  function resetDetailPanel() {
+    const panel = document.getElementById("detail-panel");
+    panel.innerHTML = "";
+    const hint = document.createElement("p");
+    hint.id = "detail-hint";
+    hint.textContent = "표에서 사이클(행)을 클릭하면 여기에 설명이 표시됩니다.";
+    panel.appendChild(hint);
+    document.querySelectorAll("#table tbody tr.selected").forEach((tr) => tr.classList.remove("selected"));
+  }
+
+  function showCycleDetail(tr, cycle, prevCycle) {
+    document.querySelectorAll("#table tbody tr.selected").forEach((row) => row.classList.remove("selected"));
+    tr.classList.add("selected");
+
+    const panel = document.getElementById("detail-panel");
+    panel.innerHTML = "";
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "detail-close";
+    closeBtn.textContent = "✕ 닫기";
+    closeBtn.addEventListener("click", resetDetailPanel);
+    panel.appendChild(closeBtn);
+
+    const heading = document.createElement("h4");
+    heading.textContent = `${fmtTime(cycle.ts)} 사이클`;
+    panel.appendChild(heading);
+
+    for (const line of describeCycle(cycle, prevCycle)) {
+      const p = document.createElement("p");
+      p.textContent = line;
+      panel.appendChild(p);
+    }
+  }
+
+  function renderTable(cycles, rows) {
     const tbody = document.querySelector("#table tbody");
     tbody.innerHTML = "";
-    for (const r of rows) {
+    rows.forEach((r, i) => {
       const tr = document.createElement("tr");
+      tr.className = "cycle-row";
       const tds = [
         [r.ts, false], [r.mined, true], [r.shadow_count, true],
         [r.promoted, false], [r.recall_at_k, true], [r.mrr, true],
@@ -229,8 +330,11 @@
         tr.appendChild(td);
       }
       tr.children[3].className = r.promoted === "승격" ? "promoted-yes" : "promoted-no";
+      tr.addEventListener("click", () => {
+        showCycleDetail(tr, cycles[i], i > 0 ? cycles[i - 1] : null);
+      });
       tbody.appendChild(tr);
-    }
+    });
   }
 
   let allCycles = [];   // /cycle-history 원본(ts ASC)
@@ -264,7 +368,10 @@
     document.getElementById("no-match-hint").style.display = matchedIdx.length ? "none" : "";
 
     drawChart(document.getElementById("chart"), shownCycles);
-    renderTable(shownRows);
+    renderTable(shownCycles, shownRows);
+    // 필터/표시 개수가 바뀌면 이전에 선택해 보던 사이클이 더는 표에 없을 수
+    // 있으니 패널을 안내 문구로 되돌린다.
+    resetDetailPanel();
   }
 
   document.querySelectorAll(".filter-row input[data-col]").forEach((input) => {
@@ -293,6 +400,7 @@
       document.getElementById("chart-wrap").style.display = "none";
       document.getElementById("table").style.display = "none";
       document.getElementById("toolbar").style.display = "none";
+      document.getElementById("detail-panel").style.display = "none";
       document.getElementById("empty-hint").style.display = "";
       return;
     }
