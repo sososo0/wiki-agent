@@ -2,6 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wiki-agent graph</title>
 <script src="https://unpkg.com/vis-network@9/standalone/umd/vis-network.min.js"></script>
 <style>
@@ -60,14 +61,25 @@
   #focus-banner a:hover { background: #1d4ed8; }
   #graph-toolbar {
     position: absolute; top: 10px; right: 10px; z-index: 10;
-    display: flex; gap: 8px;
+    display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;
+    max-width: calc(100vw - 20px);
   }
-  #info-toggle, #reset-clusters, #back-to-overview {
+  #info-toggle, #reset-clusters, #back-to-overview, #entry-list-toggle {
     border: 1px solid #e2e8f0; background: #fff; border-radius: 8px;
     padding: 5px 11px; font-size: 13px; cursor: pointer; color: #374151;
     box-shadow: 0 1px 2px rgba(0,0,0,0.06);
   }
-  #info-toggle:hover, #reset-clusters:hover, #back-to-overview:hover { background: #f1f5f9; }
+  #info-toggle:hover, #reset-clusters:hover, #back-to-overview:hover,
+  #entry-list-toggle:hover { background: #f1f5f9; }
+  /* 좁은 화면에서만 쓰는 "목록" 토글/닫기 버튼·백드롭 — 데스크톱에서는 사이드
+     컬럼이 항상 보이니 숨겨둔다(아래 미디어 쿼리가 좁은 화면에서만 보여줌). */
+  #entry-list-toggle, #panel-close-btn, #drawer-backdrop { display: none; }
+  #panel-close-btn {
+    position: fixed; top: 10px; right: 10px; z-index: 31;
+    border: 1px solid #e2e8f0; background: #fff; border-radius: 999px;
+    width: 32px; height: 32px; font-size: 14px; cursor: pointer; color: #374151;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+  }
 
   #info {
     border-bottom: 1px solid #e2e8f0; padding: 8px 20px; background: #f8fafc;
@@ -113,6 +125,32 @@
   #entry-list button:hover { background: #f1f5f9; }
   #entry-list button.active { background: #eff6ff; color: #2563eb; font-weight: 600; }
   #entry-list .entry-id { display: block; font-size: 11px; color: #94a3b8; }
+
+  /* 좁은 화면: 항목 목록/상세 패널이 항상-같이-보이는 3번째 컬럼이면 그래프 자체가
+     쓸 수 있는 너비가 너무 좁아진다(실측: 768px에서 약 188px로 짜부라짐) — 그래프는
+     항상 풀폭을 쓰고, 두 사이드 패널은 평소엔 숨겨진 오버레이 드로어로 바꾼다. */
+  @media (max-width: 860px) {
+    #entry-list-toggle { display: inline-flex; }
+    #drawer-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 25;
+    }
+    body.list-open #drawer-backdrop, body.panel-open #drawer-backdrop { display: block; }
+    body.panel-open #panel-close-btn { display: block; }
+
+    #entry-list-wrap {
+      position: fixed; inset: 0 auto 0 0; z-index: 30; width: 85%; max-width: 320px;
+      transform: translateX(-100%); transition: transform 0.2s ease;
+      background: #fff; box-shadow: 2px 0 12px rgba(0,0,0,0.15);
+    }
+    body.list-open #entry-list-wrap { transform: translateX(0); }
+
+    #panel {
+      position: fixed; inset: 0 0 0 auto; z-index: 30; width: 85%; max-width: 360px;
+      transform: translateX(100%); transition: transform 0.2s ease;
+      background: #fff; border-left: none; box-shadow: -2px 0 12px rgba(0,0,0,0.15);
+    }
+    body.panel-open #panel { transform: translateX(0); }
+  }
 </style>
 </head>
 <body>
@@ -152,6 +190,7 @@
     </div>
   </div>
 </div>
+<div id="drawer-backdrop"></div>
 <div id="wrap">
   <div id="entry-list-wrap">
     <input id="entry-list-search" type="text" placeholder="🔍 위키 항목 검색...">
@@ -159,12 +198,14 @@
   </div>
   <div id="network-wrap">
     <div id="graph-toolbar">
+      <button id="entry-list-toggle" type="button">☰ 항목 목록</button>
       <button id="info-toggle" type="button">ℹ️ 설명 숨기기</button>
       <button id="reset-clusters" type="button">⟳ 초기 화면으로</button>
       <button id="back-to-overview" type="button" style="display:none">← 전체로 돌아가기</button>
     </div>
     <div id="network"></div>
   </div>
+  <button id="panel-close-btn" type="button">✕</button>
   <div id="panel"><p id="empty-hint">노드를 클릭하면 상세 정보가 표시됩니다.</p></div>
 </div>
 
@@ -193,6 +234,14 @@
     doc_verified: "문서 검증됨", curated_from_logs: "대화 로그 기반 생성",
     curated_from_web: "웹 검색 기반 생성", agent_generated: "AI 생성(미검증)",
   };
+
+  const NARROW_MEDIA = window.matchMedia("(max-width: 860px)");
+
+  // 좁은 화면에서는 #panel이 항상-보이는 컬럼이 아니라 오버레이 드로어라,
+  // 내용을 채울 때마다 열어줘야 한다(닫기는 panel-close-btn/백드롭/뒤로가기).
+  function openPanelDrawer() {
+    if (NARROW_MEDIA.matches) document.body.classList.add("panel-open");
+  }
 
   // #info 범례에 이미 있는 문구를 그대로 옮긴 것 — 엣지 상세 패널에서도 같은
   // 설명을 보여주기 위함(새로 지어내지 않음).
@@ -291,6 +340,7 @@
   }
 
   function renderDetail(n) {
+    openPanelDrawer();
     const panel = document.getElementById("panel");
     panel.innerHTML = "";
 
@@ -322,6 +372,7 @@
   // 엣지(관계)를 클릭했을 때 같은 #panel에 보여줄 상세 정보 — 어떤 두 노드를
   // 연결하는지(클릭하면 그 노드로 포커스 이동), 관계 종류, 관계의 정도.
   function renderEdgeDetail(edge) {
+    openPanelDrawer();
     const panel = document.getElementById("panel");
     panel.innerHTML = "";
 
@@ -385,6 +436,26 @@
     const hidden = infoPanel.style.display === "none";
     infoPanel.style.display = hidden ? "" : "none";
     infoToggle.textContent = hidden ? "ℹ️ 설명 숨기기" : "ℹ️ 설명 보기";
+  });
+  // 좁은 화면에서는 범례가 그래프 영역을 거의 다 차지하므로 기본 접어둔다
+  // (버튼으로 언제든 다시 펼칠 수 있음 — 위 핸들러 그대로 재사용).
+  if (NARROW_MEDIA.matches) {
+    infoPanel.style.display = "none";
+    infoToggle.textContent = "ℹ️ 설명 보기";
+  }
+
+  // 좁은 화면용 목록/상세 드로어 — 토글 버튼, 닫기 버튼, 백드롭 클릭으로 닫기.
+  const entryListToggle = document.getElementById("entry-list-toggle");
+  const panelCloseBtn = document.getElementById("panel-close-btn");
+  const drawerBackdrop = document.getElementById("drawer-backdrop");
+  entryListToggle.addEventListener("click", () => {
+    document.body.classList.toggle("list-open");
+  });
+  panelCloseBtn.addEventListener("click", () => {
+    document.body.classList.remove("panel-open");
+  });
+  drawerBackdrop.addEventListener("click", () => {
+    document.body.classList.remove("list-open", "panel-open");
   });
 
   function buildEntryList(nodes, onSelect) {
@@ -457,6 +528,7 @@
   }
 
   function focusNode(id) {
+    document.body.classList.remove("list-open");
     const n = data.nodes.find((x) => x.id === id);
     if (!n) return;
     const targetView = n.cluster_size > 1 ? "detail:" + n.cluster_id : "overview";

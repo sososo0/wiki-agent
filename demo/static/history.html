@@ -2,6 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wiki-agent 사이클 추이</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 0; color: #1f2937; }
@@ -84,6 +85,19 @@
   #toolbar button:hover { background: #f1f5f9; }
   #page-size-wrap { font-size: 12px; color: #64748b; display: flex; align-items: center; gap: 6px; }
   #page-size-wrap select { font-size: 12px; padding: 2px 4px; }
+  /* 컬럼이 많은 표는 좁은 화면에서 줄바꿈 대신 가로 스크롤로 — 칸을 숨기거나
+     재배치하지 않는 가장 단순하고 안전한 방법. */
+  #table-wrap { overflow-x: auto; }
+  /* 캔버스는 내부 해상도(width/height 속성)는 그대로 두고 CSS로만 비율 유지
+     축소 — 리사이즈 시 재드로우는 안 해서 약간 흐려질 수 있지만 데모 규모에는
+     충분하고, 가로 스크롤/잘림은 막아준다. */
+  #chart, #detail-panel canvas { max-width: 100%; height: auto; }
+
+  @media (max-width: 860px) {
+    #page-wrap { flex-direction: column; }
+    #detail-panel { width: 100%; position: static; }
+    #toolbar { flex-wrap: wrap; }
+  }
   #column-legend { display: none; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 12px; color: #374151; line-height: 1.6; }
   #column-legend dt { font-weight: 600; color: #1f2937; }
   #column-legend dd { margin: 0 0 6px 0; color: #64748b; }
@@ -190,6 +204,7 @@
       </select>
     </span>
   </div>
+  <div id="table-wrap">
   <table id="table">
     <thead>
       <tr>
@@ -227,6 +242,7 @@
     </thead>
     <tbody></tbody>
   </table>
+  </div>
   <p id="empty-hint" style="display:none">아직 기록된 사이클이 없습니다. 갱신 사이클을 1회 이상 실행하면 여기 쌓입니다.</p>
   <p id="no-match-hint" style="display:none; color:#94a3b8;">필터에 맞는 사이클이 없습니다.</p>
 </div>
