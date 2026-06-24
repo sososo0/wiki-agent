@@ -130,6 +130,48 @@ def test_dry_run_still_reports_skip_for_unchanged_chunks(tmp_path, monkeypatch):
     assert result["skipped_chunks"] == 2
 
 
+def test_near_duplicate_check_skips_recuration_for_minor_edit(tmp_path, monkeypatch):
+    """근접 중복 체크(옵트인)를 켜면, chunk_hash가 달라도 기존 엔트리와 임베딩이
+    거의 같으면(오탈자/문구 미세 수정 흉내) LLM을 다시 호출하지 않고 그대로
+    넘어가야 한다 — 기존 콘텐츠도 안 바뀌어야 한다."""
+    import numpy as np
+
+    _init_db(tmp_path, monkeypatch)
+    doc_path = tmp_path / "doc.md"
+    doc_path.write_text(DOC_TEXT, encoding="utf-8")
+
+    run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+    retries_entry = next(
+        e for e in wiki_store.list_active_entries() if e["topic"] == "Retries")
+    wiki_store.set_embedding(retries_entry["entry_id"], retries_entry["version"], np.array([1.0, 0.0]))
+    original_canonical = retries_entry["canonical"]
+
+    # "Retries" 섹션만 한 단어 추가해 chunk_hash를 바꾼다(근접 중복 시뮬레이션).
+    edited_text = DOC_TEXT.replace(
+        "exponential backoff and random jitter,",
+        "exponential backoff and random jitter plus some extra wording,",
+    )
+    doc_path.write_text(edited_text, encoding="utf-8")
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("근접 중복인데 curate(LLM)가 호출됨")
+
+    result = run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_should_not_be_called, judge_fn=_should_not_be_called, evaluate_fn=_stub_evaluate_fn,
+        near_duplicate_check=True, dedup_embed_fn=lambda texts: [[0.99, 0.0] for _ in texts],
+    )
+
+    assert result["skipped_near_duplicate_chunks"] == 1
+    assert result["llm_calls"] == 0
+    unchanged_entry = next(
+        e for e in wiki_store.list_active_entries() if e["entry_id"] == retries_entry["entry_id"])
+    assert unchanged_entry["canonical"] == original_canonical
+
+
 def test_ingest_is_idempotent_on_unchanged_doc(tmp_path, monkeypatch):
     _init_db(tmp_path, monkeypatch)
     doc_path = tmp_path / "doc.md"

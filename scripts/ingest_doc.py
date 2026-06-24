@@ -46,7 +46,9 @@ from core.pipeline import chunk, curate, dedupe, gate, parse, promote, reindex
 def _existing_entries_by_id() -> Dict[str, Dict[str, Any]]:
     """active+shadow+rejected 엔트리를 entry_id로 합친 dict(+status 태깅).
     dedupe.py가 chunk_hash 비교로 콘텐츠 변경 여부 및 과거 게이트 거부 여부를
-    판단하는 입력."""
+    판단하는 입력. 영속 임베딩(있으면)을 "_embedding"으로 같이 채운다 —
+    dedupe.resolve_doc_chunk_op의 근접 중복 체크(embed_fn 주입 시에만 실제로
+    쓰임)가 DB를 직접 안 보고도 비교할 수 있게 미리 읽어서 넘기는 것."""
     by_id: Dict[str, Dict[str, Any]] = {}
     for e in wiki_store.list_active_entries():
         by_id[e["entry_id"]] = {**e, "status": "active"}
@@ -54,6 +56,10 @@ def _existing_entries_by_id() -> Dict[str, Dict[str, Any]]:
         by_id[e["entry_id"]] = {**e, "status": "shadow"}
     for e in wiki_store.list_rejected_entries():
         by_id[e["entry_id"]] = {**e, "status": "rejected"}
+    for entry_id, entry in by_id.items():
+        cached = wiki_store.get_embedding(entry_id)
+        if cached is not None:
+            entry["_embedding"] = cached[1]
     return by_id
 
 
@@ -70,21 +76,36 @@ def run_doc_ingest(
     judge_fn: Optional[Callable] = None,
     evaluate_fn: Optional[Callable] = None,
     dry_run: bool = False,
+    near_duplicate_check: bool = False,
+    dedup_embed_fn: Optional[Callable] = None,
+    near_duplicate_threshold: float = 0.97,
 ) -> Dict[str, Any]:
     """dry_run=True면 parse/chunk/dedupe까지만 실행하고 각 candidate가 어떤
     op(create/update/skip/skip_rejected)로 분류되는지만 보고한다 — curate(LLM
     호출), gate(judge LLM 호출), wiki_store.add_entry(DB 쓰기), promote(eval LLM
     호출 + 가능하면 DB 쓰기) 전부 건너뛴다. 콘텐츠/비용을 미리 점검하고 싶을 때
-    실제 LLM 호출·DB 변경 없이 실행할 수 있게 한다."""
+    실제 LLM 호출·DB 변경 없이 실행할 수 있게 한다.
+
+    near_duplicate_check=True면(기본 off — 임베딩 모델을 추가로 로딩/호출)
+    chunk_hash가 달라도 기존 엔트리와 임베딩 코사인 유사도가
+    near_duplicate_threshold 이상이면 재큐레이션을 생략한다(core/pipeline/
+    dedupe.py 참고) — 오탈자/포맷팅 수준의 편집마다 LLM을 다시 부르는 비용을
+    줄인다."""
     if not dry_run:
         from eval.run_eval import GOLD_PATH, evaluate, load_gold
         evaluate_fn = evaluate_fn or evaluate
+
+    dedup_embed_fn_resolved = None
+    if near_duplicate_check:
+        from core import retrieval
+        dedup_embed_fn_resolved = dedup_embed_fn or retrieval.default_embed_fn
 
     summary: Dict[str, Any] = {
         "parsed_files": [],
         "failed_files": [],
         "skipped_chunks": 0,
         "skipped_rejected_chunks": 0,
+        "skipped_near_duplicate_chunks": 0,
         "would_curate": [],
         "shadow_written": [],
         "rejected": [],
@@ -113,12 +134,18 @@ def run_doc_ingest(
     doc_judge_fn = judge_fn or curate.make_doc_judge_fn(chunk_text_by_entry_id)
 
     for cand in candidates:
-        op_info = dedupe.resolve_doc_chunk_op(cand, existing_by_id)
+        op_info = dedupe.resolve_doc_chunk_op(
+            cand, existing_by_id,
+            embed_fn=dedup_embed_fn_resolved, near_duplicate_threshold=near_duplicate_threshold,
+        )
         if op_info["op"] == "skip":
             summary["skipped_chunks"] += 1
             continue
         if op_info["op"] == "skip_rejected":
             summary["skipped_rejected_chunks"] += 1
+            continue
+        if op_info["op"] == "skip_near_duplicate":
+            summary["skipped_near_duplicate_chunks"] += 1
             continue
 
         if dry_run:
@@ -206,6 +233,13 @@ def main():
         "--dry-run", action="store_true",
         help="LLM을 호출하거나 DB에 쓰지 않고, 각 청크가 create/update/skip/"
              "skip_rejected 중 무엇으로 분류되는지만 미리 보여준다(비용 없음).")
+    parser.add_argument(
+        "--near-duplicate-check", action="store_true",
+        help="chunk_hash가 달라도 기존 엔트리와 임베딩 유사도가 높으면(오탈자/포맷팅 "
+             "수준 편집) 재큐레이션을 생략한다(기본 off — 임베딩 모델 추가 로딩/호출).")
+    parser.add_argument(
+        "--near-duplicate-threshold", type=float, default=0.97,
+        help="근접 중복 판정 코사인 유사도 임계값(기본 0.97) — --near-duplicate-check일 때만 적용")
     args = parser.parse_args()
 
     wiki_store.init_db(seed=True)
@@ -214,6 +248,8 @@ def main():
         max_chars=args.max_chars, min_chars=args.min_chars,
         daily_cap=args.daily_cap, min_sources=args.min_sources,
         dry_run=args.dry_run,
+        near_duplicate_check=args.near_duplicate_check,
+        near_duplicate_threshold=args.near_duplicate_threshold,
     )
 
     print(f"parsed files: {len(result['parsed_files'])}")
@@ -221,6 +257,7 @@ def main():
         print(f"failed files: {result['failed_files']}")
     print(f"skipped chunks (unchanged): {result['skipped_chunks']}")
     print(f"skipped chunks (already rejected, unchanged): {result['skipped_rejected_chunks']}")
+    print(f"skipped chunks (near-duplicate): {result['skipped_near_duplicate_chunks']}")
 
     if args.dry_run:
         print(f"would curate (LLM call + gate, not run): {len(result['would_curate'])}")

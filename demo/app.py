@@ -95,9 +95,13 @@ TRUST_PROXY = os.environ.get("WIKI_AGENT_DEMO_TRUST_PROXY", "0") == "1"
 # 거대 payload로 서버를 묶어두는 시도를 막기 위한 요청 본문 크기 상한.
 MAX_REQUEST_BODY_BYTES = int(os.environ.get("WIKI_AGENT_DEMO_MAX_BODY_BYTES", str(20 * 1024)))
 
-_daily_budget = {"date": None, "count": 0}
-_conv_call_counts: Dict[str, int] = {}
-_ip_daily_counts: Dict[str, Dict[str, Any]] = {}
+# /notifications/{id}/read(알림 읽음 처리)를 막는 공유 비밀값 — notifications는
+# 사용자별이 아니라 전역 운영 알림이라, 인증 없이 누구나 호출하면 공개 데모를
+# 보는 누구나 운영자가 아직 못 본 알림을 마음대로 숨길 수 있다. 비워두면(기본,
+# 로컬 개발/단독 실행) 인증 없이 허용 — 운영자가 직접 배포할 때만 설정해
+# 자기 브라우저 localStorage(wiki_agent_admin_token)에 같은 값을 넣어 쓴다.
+ADMIN_TOKEN = os.environ.get("WIKI_AGENT_DEMO_ADMIN_TOKEN")
+
 _ip_burst_log: Dict[str, list] = {}
 
 
@@ -161,29 +165,29 @@ PENDING_CLARIFY_TTL_SECONDS = 600  # 10분 안에 답하지 않으면 새 질문
 
 
 def _consume_call_budget(conv_id: str, ip: str) -> bool:
-    """LLM 호출(generate/generate_title) 직전에 호출 — True면 예산을 1 차감하고
+    """LLM 호출(generate/generate_title) 직전에 호출 — True면 예산을 1 증가시키고
     호출을 허용, False면 한도 초과로 호출 자체를 막아야 한다는 뜻. IP 한도가
     conv_id 한도와 별도로 있는 이유: conv_id는 클라이언트가 매 요청마다 새로
     만들 수 있는 값이라(crypto.randomUUID()), 그것만으로는 같은 사람이 한도를
-    무한히 우회할 수 있다."""
+    무한히 우회할 수 있다.
+
+    카운터는 core/wiki_store.py의 llm_call_budget 테이블에 적재한다(프로세스
+    메모리 dict가 아님) — 데모를 여러 워커로 띄워도(uvicorn --workers N) 모든
+    워커가 같은 DB를 보므로 한도가 워커 수만큼 곱해지지 않는다."""
     today = time.strftime("%Y-%m-%d")
-    if _daily_budget["date"] != today:
-        _daily_budget["date"] = today
-        _daily_budget["count"] = 0
-    if _daily_budget["count"] >= DAILY_CALL_LIMIT:
+    ip_key = f"{ip}:{today}"
+
+    if wiki_store.get_call_budget_counter("daily", today) >= DAILY_CALL_LIMIT:
         return False
-    if _conv_call_counts.get(conv_id, 0) >= PER_CONV_CALL_LIMIT:
+    if wiki_store.get_call_budget_counter("conv", conv_id) >= PER_CONV_CALL_LIMIT:
         return False
-    ip_entry = _ip_daily_counts.setdefault(ip, {"date": today, "count": 0})
-    if ip_entry["date"] != today:
-        ip_entry["date"] = today
-        ip_entry["count"] = 0
-    if ip_entry["count"] >= PER_IP_DAILY_CALL_LIMIT:
+    if wiki_store.get_call_budget_counter("ip_daily", ip_key) >= PER_IP_DAILY_CALL_LIMIT:
         logger.warning("IP 일일 LLM 호출 한도 초과: ip=%s", ip)
         return False
-    _daily_budget["count"] += 1
-    _conv_call_counts[conv_id] = _conv_call_counts.get(conv_id, 0) + 1
-    ip_entry["count"] += 1
+
+    wiki_store.increment_call_budget_counter("daily", today)
+    wiki_store.increment_call_budget_counter("conv", conv_id)
+    wiki_store.increment_call_budget_counter("ip_daily", ip_key)
     return True
 
 
@@ -566,6 +570,13 @@ def notifications():
 
 
 @app.post("/notifications/{notification_id}/read")
-def mark_notification_read(notification_id: int):
+def mark_notification_read(notification_id: int, request: Request):
+    """알림 읽음 처리(전역 — notifications는 사용자별이 아니라 운영 알림 1개당
+    하나의 read 상태). ADMIN_TOKEN이 설정돼 있으면 X-Admin-Token 헤더가 일치할
+    때만 허용한다 — 안 그러면 공개 데모를 보는 누구나 운영자가 아직 못 본
+    알림을 마음대로 읽음 처리해 숨길 수 있다. ADMIN_TOKEN이 비어 있으면(기본,
+    로컬 개발/단독 실행) 지금처럼 인증 없이 허용한다."""
+    if ADMIN_TOKEN and request.headers.get("x-admin-token") != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="관리자 토큰이 필요합니다.")
     wiki_store.mark_notification_read(notification_id)
     return {"ok": True}

@@ -25,7 +25,9 @@ doc_chunk_entry_id) + 기존 엔트리의 sources[].chunk_hash 비교로 "콘텐
           deprecated 강등 경로를 그대로 태운다.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
+
+import numpy as np
 
 from core.pipeline.curate import doc_chunk_entry_id
 
@@ -48,12 +50,26 @@ def rejected_entry_id(candidate: Dict[str, Any]) -> str:
 def resolve_doc_chunk_op(
     candidate: Dict[str, Any],
     existing_entries_by_id: Dict[str, Dict[str, Any]],
+    *,
+    embed_fn: Optional[Callable] = None,
+    near_duplicate_threshold: float = 0.97,
 ) -> Dict[str, Any]:
     """candidate(chunk.to_doc_candidates 출력 1건) -> {"op", "entry_id", "supersedes"}.
 
     existing_entries_by_id: {entry_id: {"status": "active"|"shadow"|"deprecated"|
-    "rejected", "version": int, "sources": [...], ...}} — active/shadow/rejected
-    엔트리를 합쳐서 호출부가 미리 구성."""
+    "rejected", "version": int, "sources": [...], "_embedding": np.ndarray|None,
+    ...}} — active/shadow/rejected 엔트리를 합쳐서 호출부가 미리 구성한다.
+    "_embedding"은 옵션(있으면 wiki_store.get_embedding으로 미리 채워 넣은 값) —
+    DB 접근 없는 순수 함수 원칙을 지키려고 호출부가 미리 읽어서 넘긴다.
+
+    embed_fn을 주면(기본 None — 안 주면 기존 동작과 100% 동일, 하위 호환)
+    chunk_hash가 달라 "update"로 분류되려는 후보에 대해서만(비용 절감을 위해
+    필요한 경우만) 새 청크 텍스트를 embed_fn으로 인코딩해 기존 엔트리의
+    "_embedding"과 코사인 유사도를 비교한다. near_duplicate_threshold(기본
+    0.97, "거의 동일"에 해당하는 높은 값) 이상이면 재큐레이션 없이
+    "skip_near_duplicate"로 분류 — 오탈자/줄바꿈 수준의 편집이 매번 LLM
+    재큐레이션을 부르는 비용을 줄인다. 기존 엔트리에 "_embedding"이 없으면
+    (아직 검색/그래프 빌드를 한 번도 안 거침) 안전하게 update로 폴백한다."""
     base_entry_id = doc_chunk_entry_id(candidate)
 
     if rejected_entry_id(candidate) in existing_entries_by_id:
@@ -66,6 +82,13 @@ def resolve_doc_chunk_op(
 
     if _existing_chunk_hash(existing) == candidate["chunk_hash"]:
         return {"op": "skip", "entry_id": base_entry_id, "supersedes": None}
+
+    if embed_fn is not None and existing.get("_embedding") is not None:
+        candidate_vec = np.asarray(embed_fn([candidate["text"]])[0])
+        existing_vec = np.asarray(existing["_embedding"])
+        similarity = float(candidate_vec @ existing_vec)
+        if similarity >= near_duplicate_threshold:
+            return {"op": "skip_near_duplicate", "entry_id": base_entry_id, "supersedes": None}
 
     if existing.get("status") == "active":
         new_version = existing.get("version", 1) + 1

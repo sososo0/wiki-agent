@@ -70,14 +70,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(demo_app, "generate_title", lambda query, model=None: "stub title")
     monkeypatch.setattr(retrieval, "default_embed_fn", _stub_embed_fn)
     monkeypatch.setattr(retrieval, "default_rerank_fn", _stub_rerank_fn)
-    # 호출 예산/보안 상태는 모두 모듈 전역(dict)이라 테스트 간에 그대로 남으면
-    # 순서/실행 횟수에 따라 한도 초과가 다르게 발생할 수 있다 — 매 테스트 시작
-    # 전 깨끗한 상태로 리셋해 격리한다. TestClient는 매 요청을 같은 고정 IP로
-    # 보내므로(버스트/일일 IP 한도가 공유) 리셋이 없으면 테스트가 누적된 카운트로
-    # 서로 영향을 준다.
-    demo_app._daily_budget.update({"date": None, "count": 0})
-    demo_app._conv_call_counts.clear()
-    demo_app._ip_daily_counts.clear()
+    # LLM 호출 예산(daily/conv/ip_daily)은 이제 매 테스트가 새로 만드는 tmp
+    # DB(llm_call_budget 테이블)에 있어서 자동으로 깨끗하게 시작한다 — 리셋 불필요.
+    # 버스트 리미터/명확화 대기 상태는 여전히 프로세스 메모리 dict라 직접 리셋해야
+    # 한다(TestClient가 매 요청을 같은 고정 IP로 보내므로 안 비우면 테스트끼리
+    # 영향을 준다).
     demo_app._ip_burst_log.clear()
     demo_app._pending_clarifications.clear()
 
@@ -612,3 +609,38 @@ def test_notifications_mark_read_decrements_unread_count(client):
     body = client.get("/notifications").json()
     assert body["unread_count"] == 0
     assert body["notifications"][0]["read"] == 1
+
+
+def test_notifications_read_blocked_without_admin_token_when_configured(client, monkeypatch):
+    monkeypatch.setattr(demo_app, "ADMIN_TOKEN", "secret")
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    notif_id = wiki_store.list_notifications()[0]["id"]
+
+    resp = client.post(f"/notifications/{notif_id}/read")
+    assert resp.status_code == 403
+    assert wiki_store.list_notifications()[0]["read"] == 0  # 실제로 안 바뀌어야 함
+
+
+def test_notifications_read_allowed_with_correct_admin_token(client, monkeypatch):
+    monkeypatch.setattr(demo_app, "ADMIN_TOKEN", "secret")
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    notif_id = wiki_store.list_notifications()[0]["id"]
+
+    resp = client.post(
+        f"/notifications/{notif_id}/read", headers={"X-Admin-Token": "secret"})
+    assert resp.status_code == 200
+    assert wiki_store.list_notifications()[0]["read"] == 1
+
+
+def test_consume_call_budget_counters_are_shared_via_db_not_process_memory(client):
+    """daily/conv/ip_daily 카운터가 demo.app 모듈의 in-memory dict가 아니라
+    wiki_store(DB)에 있어야 한다 — 여러 워커 프로세스가 떠도 한도가 공유되는
+    근거. 직접 wiki_store 함수로 조회해 /chat 호출 결과와 일치하는지 확인."""
+    client.post("/chat", json={"conv_id": "conv-budget", "turn_id": 0, "message": "first question"})
+    client.post("/chat", json={"conv_id": "conv-budget", "turn_id": 1, "message": "second question"})
+
+    # turn_id=0은 generate() 1회 + 제목 생성 백그라운드 태스크 1회 = 2건,
+    # turn_id=1은 generate() 1회 -> 합계 3건.
+    assert wiki_store.get_call_budget_counter("conv", "conv-budget") == 3
+    today = time.strftime("%Y-%m-%d")
+    assert wiki_store.get_call_budget_counter("daily", today) >= 3

@@ -573,10 +573,19 @@
       btn.append(row, messageDiv, metaDiv);
       btn.addEventListener("click", async () => {
         if (!n.read) {
-          await fetch(`/notifications/${n.id}/read`, { method: "POST" });
-          btn.classList.remove("unread");
-          n.read = 1;
-          refreshNotifBadge();
+          // 운영자만 의미 있는 동작 — WIKI_AGENT_DEMO_ADMIN_TOKEN이 서버에 설정돼
+          // 있으면 같은 값을 자기 브라우저 devtools로 localStorage에 넣어둬야
+          // 403 없이 동작한다(입력 UI는 일부러 안 둠).
+          const adminToken = localStorage.getItem("wiki_agent_admin_token");
+          const resp = await fetch(`/notifications/${n.id}/read`, {
+            method: "POST",
+            headers: adminToken ? { "X-Admin-Token": adminToken } : {},
+          });
+          if (resp.ok) {
+            btn.classList.remove("unread");
+            n.read = 1;
+            refreshNotifBadge();
+          }
         }
       });
       notifPanel.appendChild(btn);

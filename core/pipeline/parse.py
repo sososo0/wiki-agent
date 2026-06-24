@@ -18,6 +18,11 @@ from typing import Any, Dict, List
 
 MAX_FILE_BYTES = int(os.environ.get("WIKI_AGENT_MAX_DOC_BYTES", 2 * 1024 * 1024))
 
+# UTF-8 디코딩 실패 시 errors="replace"로 best-effort 디코딩한 뒤, "�"(치환 문자)
+# 비율이 이 임계값을 넘으면 그제서야 진짜 인코딩 오류로 실패 처리한다(적은 수의
+# 잘못된 바이트는 무시하고 계속 진행) — MAX_FILE_BYTES와 같은 패턴으로 env var화.
+ENCODING_ERROR_THRESHOLD = float(os.environ.get("WIKI_AGENT_ENCODING_ERROR_THRESHOLD", "0.05"))
+
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
 
@@ -96,7 +101,7 @@ def parse_markdown_file(path: str) -> Dict[str, Any]:
     except UnicodeDecodeError:
         text = raw.decode("utf-8", errors="replace")
         replaced = text.count("�")
-        if len(text) > 0 and replaced / len(text) > 0.05:
+        if len(text) > 0 and replaced / len(text) > ENCODING_ERROR_THRESHOLD:
             result["error"] = "encoding error (too many invalid bytes)"
             return result
 

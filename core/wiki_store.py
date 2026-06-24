@@ -144,6 +144,21 @@ CREATE TABLE IF NOT EXISTS wiki_embedding (
   updated_at REAL
 );
 
+-- demo/app.py의 LLM 호출 예산(_consume_call_budget)을 프로세스 메모리 dict가
+-- 아니라 여기에 적재한다 — 데모를 여러 워커 프로세스로 띄우면(uvicorn --workers
+-- N) in-memory 카운터는 워커마다 따로 생겨 한도가 사실상 N배가 되는데, 이
+-- 테이블은 모든 워커가 공유하므로 그 문제가 없다. scope: "daily"(key=날짜,
+-- 프로세스 전체 한도) | "conv"(key=conv_id, 누적·리셋 없음) | "ip_daily"
+-- (key="{ip}:{날짜}"). 버스트 리미터(_ip_burst_log)는 일부러 여기로 안
+-- 옮겼다 — 모든 요청마다 도는 미들웨어라 DB에 쓰면 그 자체가 새 쓰기 경합을
+-- 만든다(이미 LRU/WAL 등으로 줄여온 SQLite 쓰기 부담을 다시 늘리는 역효과).
+CREATE TABLE IF NOT EXISTS llm_call_budget (
+  scope TEXT NOT NULL,
+  key   TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, key)
+);
+
 -- wiki_entry는 status로(거의 모든 list_*), retrieval_log/feedback은 ts로(--window-days
 -- 윈도잉) 매번 필터링되는데 인덱스가 없으면 매번 풀스캔이다. 코퍼스/로그가 작을 때는
 -- 안 보이지만 커지면 가장 먼저 느려질 지점 — CREATE INDEX는 멱등적이라 매 init_db()
@@ -690,6 +705,31 @@ def submit_feedback(conv_id, turn_id, thumb, reason=None):
         (conv_id, turn_id, thumb, reason, time.time()))
     conn.commit()
     conn.close()
+
+
+def increment_call_budget_counter(scope: str, key: str) -> int:
+    """scope+key 카운터를 1 증가시키고 새 값을 반환한다. 여러 워커 프로세스가
+    같은 DB를 보므로, in-memory dict와 달리 프로세스 수와 무관하게 공유된
+    카운트가 유지된다(demo/app.py._consume_call_budget가 호출)."""
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO llm_call_budget (scope, key, count) VALUES (?,?,1)
+           ON CONFLICT(scope, key) DO UPDATE SET count = count + 1""",
+        (scope, key))
+    row = conn.execute(
+        "SELECT count FROM llm_call_budget WHERE scope = ? AND key = ?", (scope, key)).fetchone()
+    conn.commit()
+    conn.close()
+    return row["count"]
+
+
+def get_call_budget_counter(scope: str, key: str) -> int:
+    """현재 카운트(없으면 0) — increment 전에 한도 초과 여부를 먼저 확인하는 데 쓴다."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT count FROM llm_call_budget WHERE scope = ? AND key = ?", (scope, key)).fetchone()
+    conn.close()
+    return row["count"] if row else 0
 
 
 def add_notification(level: str, title: str, message: str, *, conn=None) -> None:
