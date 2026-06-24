@@ -74,6 +74,30 @@ def test_agent_generated_with_verified_source_is_allowed_past_step_1():
     assert (ok, reason) == (True, "ok")
 
 
+def test_curated_from_web_without_verified_source_is_blocked():
+    """★ HARD CONSTRAINT 확장: curated_from_web도 agent_generated와 동일한
+    위험군(LLM이 스스로 근거를 댐)이라 미검증 source면 차단되어야 한다."""
+    patch = {**GOOD_PATCH, "provenance": "curated_from_web",
+             "sources": [{"type": "web", "url": "https://example.com", "verified": False}]}
+    ok, reason = gate.passes_gate(
+        patch, today_writes=0, existing_entries=EXISTING_ENTRIES,
+        judge_fn=_stub_judge_high,
+    )
+    assert ok is False
+    assert reason == "curated_from_web requires a verified source"
+
+
+def test_curated_from_web_with_verified_source_is_allowed_past_step_1():
+    patch = {**GOOD_PATCH, "provenance": "curated_from_web",
+             "sources": [{"type": "web", "url": "https://example.com/a", "verified": True},
+                         {"type": "web", "url": "https://example.com/b", "verified": True}]}
+    ok, reason = gate.passes_gate(
+        patch, today_writes=0, existing_entries=EXISTING_ENTRIES,
+        judge_fn=_stub_judge_high,
+    )
+    assert (ok, reason) == (True, "ok")
+
+
 def test_daily_cap_exceeded_is_blocked():
     ok, reason = gate.passes_gate(
         GOOD_PATCH, today_writes=20, existing_entries=EXISTING_ENTRIES,

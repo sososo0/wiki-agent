@@ -3,7 +3,8 @@ wiki-agent / core / pipeline / gate.py
 
 오염 게이트. patch가 shadow로라도 DB에 들어가기 전 마지막 검문소.
 CLAUDE.md HARD CONSTRAINT를 코드로 강제한다: agent_generated 단독(미검증
-source) 승격/반영 금지. 비용이 드는 체크(LLM grounding)는 가장 마지막에
+source) 승격/반영 금지 — curated_from_web도 LLM이 스스로 근거를 대는 같은
+위험군이라 동일하게 적용한다. 비용이 드는 체크(LLM grounding)는 가장 마지막에
 돌려 싸고 결정적인 체크부터 빨리 떨어뜨린다(daily_cap, source 다양성,
 자카드 중복은 전부 네트워크 없이 결정론적).
 
@@ -118,10 +119,11 @@ def passes_gate(
     judge_fn: Optional[Callable] = None,
 ) -> Tuple[bool, str]:
     """patch가 shadow로 들어가도 되는지 5단계로 검사. (통과여부, 이유) 반환."""
-    # 1. provenance 규칙 (★ HARD CONSTRAINT: agent_generated 단독 승격 금지)
-    if patch.get("provenance") == "agent_generated":
+    # 1. provenance 규칙 (★ HARD CONSTRAINT: LLM이 스스로 근거를 대는 provenance
+    # — agent_generated, curated_from_web — 단독(미검증 source) 승격 금지)
+    if patch.get("provenance") in ("agent_generated", "curated_from_web"):
         if not any(s.get("verified") for s in patch.get("sources", [])):
-            return False, "agent_generated requires a verified source"
+            return False, f"{patch.get('provenance')} requires a verified source"
 
     # 2. 일일 신규 shadow 상한
     if today_writes >= daily_cap:

@@ -78,6 +78,9 @@ def run_cycle(
     llm_fn: Optional[Callable] = None,
     judge_fn: Optional[Callable] = None,
     evaluate_fn: Optional[Callable] = None,
+    use_web_search: bool = False,
+    web_search_daily_cap: int = 5,
+    web_search_llm_fn: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     from eval.run_eval import GOLD_PATH, evaluate, load_gold
 
@@ -115,6 +118,7 @@ def run_cycle(
         "shadow_written": [],
         "rejected": [],
         "skipped_rejected_gaps": [],
+        "web_curated": [],
         "promote": None,
     }
 
@@ -124,11 +128,24 @@ def run_cycle(
             summary["skipped_rejected_gaps"].append(gap["norm_query"])
             continue
 
-        try:
-            patch = curate.curate(gap, llm_fn=llm_fn)
-        except Exception as e:
-            summary["rejected"].append({"gap": gap["norm_query"], "reason": f"curate failed: {e}"})
-            continue
+        # 웹 검색 경로는 비용이 더 크므로(검색 호출 자체가 추가 과금) 사이클당
+        # 별도 상한(web_search_daily_cap)을 두고, 그 안에서만 시도한다. 근거를
+        # 못 찾거나(ValueError) 호출 자체가 실패하면 기존 로그 전용 경로로
+        # 조용히 폴백한다 — README "외부 검색을 하지 않는다" 한계의 opt-in 확장.
+        patch = None
+        if use_web_search and len(summary["web_curated"]) < web_search_daily_cap:
+            try:
+                patch = curate.curate_from_web(gap, llm_fn=web_search_llm_fn)
+                summary["web_curated"].append(patch["entry_id"])
+            except Exception:
+                patch = None
+
+        if patch is None:
+            try:
+                patch = curate.curate(gap, llm_fn=llm_fn)
+            except Exception as e:
+                summary["rejected"].append({"gap": gap["norm_query"], "reason": f"curate failed: {e}"})
+                continue
 
         today_writes = wiki_store.count_entries("shadow", since_ts=since_ts)
         ok, reason = gate.passes_gate(
@@ -196,12 +213,24 @@ def main():
     parser.add_argument(
         "--window-days", type=float, default=14,
         help="mine_gaps가 보는 retrieval_log/feedback 윈도우(일). 0이면 전체 히스토리(과거 동작)")
+    parser.add_argument(
+        "--use-web-search", action="store_true",
+        help="gap 큐레이션에 Anthropic web_search 도구를 써서 실제 웹 근거(verified source)로 "
+             "초안을 채운다(기본 off — 검색 호출 자체가 추가 비용). 근거를 못 찾으면 기존 "
+             "로그 전용 경로(curated_from_logs)로 폴백한다.")
+    parser.add_argument(
+        "--web-search-daily-cap", type=int, default=5,
+        help="사이클당 web_search 경로를 시도할 gap 수 상한(기본 5) — --use-web-search일 때만 적용")
     args = parser.parse_args()
     window_days = args.window_days or None
 
     wiki_store.init_db(seed=True)
     try:
-        result = run_cycle(gold_path=args.gold, k=args.k, window_days=window_days)
+        result = run_cycle(
+            gold_path=args.gold, k=args.k, window_days=window_days,
+            use_web_search=args.use_web_search,
+            web_search_daily_cap=args.web_search_daily_cap,
+        )
     except Exception as e:
         # 사이클이 죽어도 종모양 알림으로 보여야 한다 — hermes cron 로그만 보는
         # 사람은 거의 없으니 데모 UI에도 남긴다. 삼키지 않고 그대로 재raise해
@@ -214,6 +243,7 @@ def main():
     print(f"feedback: {result['feedback']}")
     print(f"daily_cap: {result['daily_cap']}")
     print(f"shadow written: {result['shadow_written']}")
+    print(f"web curated: {result['web_curated']}")
     print(f"rejected: {result['rejected']}")
     promote_result = result["promote"]
     print(f"promote: promoted={promote_result['promoted']} "

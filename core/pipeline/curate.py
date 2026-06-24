@@ -133,6 +133,98 @@ def curate(
     }
 
 
+def default_web_search_llm_fn(
+    query_examples, model=CURATE_MODEL, max_uses: int = 3,
+) -> Dict[str, Any]:
+    """default_llm_fn과 반대로, 자기 지식으로 추측하지 말고 Anthropic 서버사이드
+    web_search 도구로 실제 웹 근거를 찾아 그 내용만으로 작성하게 한다. 응답에
+    실제로 인용된 검색결과의 {url, title} 목록을 "citations"로 함께 반환 —
+    curate_from_web()이 이걸 verified source로 기록한다."""
+    prompt = (
+        "Users repeatedly asked questions that our knowledge base could not "
+        "answer well. Use the web_search tool to find accurate, current "
+        "information that answers them — do NOT rely on your own training "
+        "knowledge, ground every claim in what you actually find. Keep "
+        "body_md under 80 words, plain prose, no markdown code fences "
+        "inside it. Also classify the difficulty tier of the question: "
+        "\"basics\" (asking for a basic definition), \"intermediate\" "
+        "(asking how to apply/configure something in practice), or "
+        "\"advanced\" (asking about deep internals or edge cases). "
+        "After searching, reply with JSON only, no other text: "
+        '{"topic": "...", "canonical": "one sentence summary", "body_md": "...", '
+        '"tier": "basics|intermediate|advanced"}\n\n'
+        "Questions:\n" + "\n".join(f"- {q}" for q in query_examples)
+    )
+    resp = _anthropic_client().messages.create(
+        model=model,
+        max_tokens=1536,
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    drafted = json.loads(_extract_json_object(text))
+    drafted["citations"] = _extract_web_citations(resp)
+    return drafted
+
+
+def _extract_web_citations(resp) -> List[Dict[str, str]]:
+    """응답 content 블록을 훑어 실제로 인용된 검색결과의 {url, title}만 모은다
+    (검색은 했지만 끝내 안 쓴 결과까지 verified source로 우길 수는 없으므로,
+    text 블록에 달린 citations만 신뢰한다). url 기준으로 중복 제거."""
+    seen = set()
+    out = []
+    for block in resp.content:
+        for cite in getattr(block, "citations", None) or []:
+            url = getattr(cite, "url", None)
+            if url and url not in seen:
+                seen.add(url)
+                out.append({"url": url, "title": getattr(cite, "title", "") or ""})
+    return out
+
+
+def curate_from_web(
+    gap: Dict[str, Any],
+    *,
+    llm_fn: Optional[Callable] = None,
+    model: str = CURATE_MODEL,
+) -> Dict[str, Any]:
+    """curate()와 동일한 골격이지만, 질문 원문이 아니라 실제 웹 검색 근거로
+    채운다. provenance="curated_from_web" + sources는 인용된 URL(verified=True).
+    검색이 근거를 못 찾아 citations가 비면 거짓 verified source를 만들지 않고
+    ValueError를 던진다 — 호출부(run_update_cycle.py)가 curate()로 폴백한다."""
+    llm_fn = llm_fn or (lambda qs: default_web_search_llm_fn(qs, model=model))
+    drafted = llm_fn(gap["query_examples"])
+
+    citations = drafted.get("citations") or []
+    if not citations:
+        raise ValueError("web search returned no citations; cannot curate from web")
+
+    entry_id = gap_entry_id(gap["norm_query"])
+
+    tier = drafted.get("tier")
+    if tier not in VALID_TIERS:
+        tier = "advanced"
+
+    return {
+        "op": "create",
+        "entry_id": entry_id,
+        "topic": drafted["topic"],
+        "canonical": drafted["canonical"],
+        "body_md": drafted.get("body_md", ""),
+        "provenance": "curated_from_web",
+        "confidence": 0.7,
+        "tier": tier,
+        "sources": [
+            {"type": "web", "url": c["url"], "title": c.get("title", ""), "verified": True}
+            for c in citations
+        ],
+        "reason": (
+            f"freq={gap['freq']} avg_top_score={gap['avg_top_score']:.3f} "
+            f"< threshold; web-grounded"
+        ),
+    }
+
+
 def default_doc_llm_fn(heading_path, text, model=CURATE_MODEL) -> Dict[str, str]:
     """실제 Anthropic 호출로 문서 청크 -> {"topic", "canonical", "body_md"} JSON.
 
