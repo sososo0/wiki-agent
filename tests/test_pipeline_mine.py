@@ -60,3 +60,29 @@ def test_mine_gaps_handles_missing_retrieved():
     gaps = mine.mine_gaps(rows, min_freq=3, score_threshold=0.0)
     assert len(gaps) == 1
     assert gaps[0]["avg_top_score"] == mine.NO_HIT_SCORE
+
+
+def test_mine_gaps_reports_no_hit_score_unmixed_when_only_some_occurrences_miss():
+    """그룹에 미스가 1건이라도 있으면 avg_top_score는 그대로 NO_HIT_SCORE여야 한다 —
+    실제 점수(5.0, 5.0)와 NO_HIT_SCORE(-1e9)를 같은 평균에 섞으면 -3.3e8 같은
+    의미 없는 값이 나오는데, 이 값이 curate.py의 LLM 프롬프트에 그대로 들어간다."""
+    rows = [
+        {"query": "mixed", "norm_query": "mixed", "retrieved": [{"entry_id": "x", "score": 5.0}]},
+        {"query": "mixed", "norm_query": "mixed", "retrieved": [{"entry_id": "x", "score": 5.0}]},
+        {"query": "mixed", "norm_query": "mixed", "retrieved": []},
+    ]
+    gaps = mine.mine_gaps(rows, min_freq=3, score_threshold=0.0)
+    assert len(gaps) == 1
+    assert gaps[0]["avg_top_score"] == mine.NO_HIT_SCORE
+
+
+def test_mine_gaps_averages_only_real_scores_when_no_misses():
+    """미스가 전혀 없으면 평균은 그대로 실제 점수들의 산술 평균이어야 한다(기존 동작 보존)."""
+    rows = [
+        {"query": "all hit", "norm_query": "all hit", "retrieved": [{"entry_id": "x", "score": -1.0}]},
+        {"query": "all hit", "norm_query": "all hit", "retrieved": [{"entry_id": "x", "score": -3.0}]},
+        {"query": "all hit", "norm_query": "all hit", "retrieved": [{"entry_id": "x", "score": -2.0}]},
+    ]
+    gaps = mine.mine_gaps(rows, min_freq=3, score_threshold=0.0)
+    assert len(gaps) == 1
+    assert gaps[0]["avg_top_score"] == -2.0

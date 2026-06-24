@@ -96,6 +96,36 @@ def test_run_cycle_creates_shadow_for_good_patch_and_blocks_bad_patch(tmp_path, 
     assert "warning" in levels
 
 
+def test_run_cycle_blocks_shadow_near_duplicate_of_shadow_written_earlier_same_cycle(tmp_path, monkeypatch):
+    """두 gap이 같은 사이클에서 거의 같은 내용으로 큐레이션되면(예: 같은 주제를
+    다르게 표현한 질문이 mine.py의 정확매칭 그룹핑 때문에 별도 gap으로 잡힌 경우),
+    먼저 shadow로 쓰인 패치와 근접 중복인 두 번째 패치는 막혀야 한다 — 이전엔
+    게이트가 active 엔트리와만 비교해서 이 경우를 못 잡았다(core/pipeline/gate.py
+    passes_gate의 pending_shadow_entries)."""
+    same_content_llm_fn = lambda query_examples: {
+        "topic": "Password reset", "canonical": "Go to settings and reset your password.",
+        "body_md": "Account > Security > Reset password.",
+    }
+
+    db_path = str(tmp_path / "test_run_cycle_dup_shadow_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    _seed_retrieval_log("how do I reset my password", n=4, score=-5.0)
+    _seed_retrieval_log("how can i reset password", n=4, score=-5.0)  # 다른 norm_query -> 별도 gap
+
+    result = run_cycle(
+        gold_path=None, k=5,
+        llm_fn=same_content_llm_fn, judge_fn=lambda patch, existing_entries: (1.0, "ok"),
+        evaluate_fn=_stub_evaluate_fn,
+    )
+
+    assert result["mined"] == 2
+    assert len(result["shadow_written"]) == 1
+    assert any(r.get("reason") == "near-duplicate of existing entry" for r in result["rejected"])
+
+
 def test_run_cycle_records_cycle_history_row(tmp_path, monkeypatch):
     """사이클마다 cycle_history에 1행씩 쌓여야 누적 추이 페이지(/cycle-history)가
     동작한다. 이 stub에서는 promote가 항상 회귀로 보고하므로(promoted=False),

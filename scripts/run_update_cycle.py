@@ -101,6 +101,11 @@ def run_cycle(
 
     daily_cap = _daily_cap_from_feedback(feedback_agg["down_rate"])
     existing_entries = wiki_store.list_active_entries()
+    # 이전 사이클들이 쌓아둔 shadow 후보 — gate의 자카드 중복 체크(4단계)가 active
+    # 뿐 아니라 이미 있는 shadow와도 비교해야, 같은 gap이 사이클마다 비슷한
+    # shadow를 계속 쌓는 걸 막을 수 있다. 이번 사이클에서 새로 shadow를 쓸 때마다
+    # 아래 루프에서 이 리스트에 더해 같은 사이클 안의 후속 gap들도 보게 한다.
+    pending_shadow_entries = wiki_store.list_shadow_entries()
     since_ts = time.time() - 86400
 
     # norm_query 단위로 "이전에 게이트가 거부한 gap"을 기억해 같은 질문이 다음
@@ -151,6 +156,7 @@ def run_cycle(
         ok, reason = gate.passes_gate(
             patch, today_writes,
             existing_entries=existing_entries,
+            pending_shadow_entries=pending_shadow_entries,
             daily_cap=daily_cap,
             judge_fn=judge_fn,
         )
@@ -171,6 +177,7 @@ def run_cycle(
             tier=patch.get("tier"),
         )
         summary["shadow_written"].append(patch["entry_id"])
+        pending_shadow_entries.append(patch)
         reindex.reindex_changed([patch["entry_id"]])
 
     gold = load_gold(gold_path or GOLD_PATH)

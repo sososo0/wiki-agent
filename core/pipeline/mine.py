@@ -28,11 +28,16 @@ def mine_gaps(
         freq = len(rows)
         if freq < min_freq:
             continue
-        top_scores = [
-            (row["retrieved"][0]["score"] if row.get("retrieved") else NO_HIT_SCORE)
-            for row in rows
-        ]
-        avg_top_score = sum(top_scores) / len(top_scores)
+        # 미스(retrieved=[]) 1건이라도 있으면 NO_HIT_SCORE를 그대로 보고한다 —
+        # 실제 점수와 -1e9를 같은 산술 평균에 섞으면(예: [5.0, 5.0, NO_HIT_SCORE])
+        # 평균이 항상 -1e9에 가까운 의미 없는 값(예: -3.3e8)이 되어 "다른 두
+        # occurrence는 점수가 좋았다"는 정보가 사라지고, 그 값이 curate.py의
+        # LLM 프롬프트에 그대로 박힌다(core/pipeline/curate.py:130,222). 미스가
+        # 없을 때만 실제 점수들의 평균을 낸다 — 미스가 가장 강한 gap 신호라는
+        # 원래 의도(NO_HIT_SCORE 자체)는 그대로 유지된다.
+        hit_scores = [row["retrieved"][0]["score"] for row in rows if row.get("retrieved")]
+        has_miss = len(hit_scores) < len(rows)
+        avg_top_score = NO_HIT_SCORE if has_miss else sum(hit_scores) / len(hit_scores)
         if avg_top_score >= score_threshold:
             continue
         query_examples = sorted({row["query"] for row in rows})

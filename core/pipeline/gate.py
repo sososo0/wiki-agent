@@ -112,13 +112,22 @@ def passes_gate(
     today_writes: int,
     *,
     existing_entries: List[Dict[str, Any]],
+    pending_shadow_entries: Optional[List[Dict[str, Any]]] = None,
     daily_cap: int = 20,
     min_sources: int = 2,
     dup_threshold: float = 0.6,
     grounding_threshold: float = 0.7,
     judge_fn: Optional[Callable] = None,
 ) -> Tuple[bool, str]:
-    """patch가 shadow로 들어가도 되는지 5단계로 검사. (통과여부, 이유) 반환."""
+    """patch가 shadow로 들어가도 되는지 5단계로 검사. (통과여부, 이유) 반환.
+
+    pending_shadow_entries: 이번/이전 사이클에서 이미 shadow로 쓴(아직 active로
+    승격 안 된) 후보들. 자카드 중복 체크(4단계)에서만 existing_entries와 합쳐서
+    본다 — judge_fn(5단계)에는 절대 안 넘긴다. judge 프롬프트는 "검증된(active)
+    엔트리와의 모순"만 보도록 설계돼 있어(아직 검증 안 된 shadow를 검증된 것처럼
+    보여주면 그 설계가 깨짐). 안 주면(기본 None) 기존 동작과 동일 — active만 보고
+    중복 체크하므로, 같은 gap이 사이클마다 비슷한 shadow를 계속 쌓을 수 있던
+    문제가 있었다."""
     # 1. provenance 규칙 (★ HARD CONSTRAINT: LLM이 스스로 근거를 대는 provenance
     # — agent_generated, curated_from_web — 단독(미검증 source) 승격 금지)
     if patch.get("provenance") in ("agent_generated", "curated_from_web"):
@@ -133,9 +142,9 @@ def passes_gate(
     if patch.get("op") == "create" and len(patch.get("sources", [])) < min_sources:
         return False, "insufficient source diversity"
 
-    # 4. 기존 active 엔트리와 근접 중복(자카드, 결정론적)
+    # 4. 기존 active + 이미 쌓인 shadow 후보와 근접 중복(자카드, 결정론적)
     patch_text = f"{patch.get('topic', '')} {patch.get('canonical', '')}"
-    for entry in existing_entries:
+    for entry in existing_entries + (pending_shadow_entries or []):
         existing_text = f"{entry.get('topic', '')} {entry.get('canonical', '')}"
         if _jaccard(patch_text, existing_text) >= dup_threshold:
             return False, "near-duplicate of existing entry"
