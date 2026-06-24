@@ -2,12 +2,11 @@
 wiki-agent / core / pipeline / parse.py
 
 문서 ingestion 파이프라인의 입력 파싱 단계. 마크다운 파일을 ATX 헤더
-(#, ##, ...) 기준으로 섹션 리스트로 분리한다. DB/LLM 접근 없는 순수 함수
-(ingest.py/mine.py와 동일 스타일).
+(#, ##, ...) 기준으로 섹션 리스트로 분리한다. DB/LLM 접근 없는 순수 함수.
 
 예외를 던지지 않고 항상 dict를 반환한다 — 한 파일의 실패(인코딩 오류, 너무
-큰 파일, OS 오류)가 디렉터리 전체 ingestion을 막지 않도록, 실패를 "error"
-필드로 호출부에 넘긴다.
+큰 파일, OS 오류)가 디렉터리 전체 ingestion을 막지 않도록 "error" 필드로
+호출부에 넘긴다.
 """
 
 import hashlib
@@ -17,6 +16,11 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 MAX_FILE_BYTES = int(os.environ.get("WIKI_AGENT_MAX_DOC_BYTES", 2 * 1024 * 1024))
+
+# UTF-8 디코딩 실패 시 errors="replace"로 best-effort 디코딩하고, "�" 비율이
+# 이 임계값을 넘을 때만 진짜 인코딩 오류로 실패 처리한다(적은 수의 잘못된
+# 바이트는 무시하고 계속 진행).
+ENCODING_ERROR_THRESHOLD = float(os.environ.get("WIKI_AGENT_ENCODING_ERROR_THRESHOLD", "0.05"))
 
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
@@ -28,7 +32,7 @@ def parse_section_text(text: str) -> List[Dict[str, Any]]:
     취급한다(.txt 등 헤더 없는 입력의 fallback)."""
     lines = text.splitlines()
     sections: List[Dict[str, Any]] = []
-    stack: List[str] = []  # 현재 헤딩 경로 (레벨별)
+    stack: List[str] = []
     cur_level = None
     cur_lines: List[str] = []
     order = 0
@@ -60,7 +64,6 @@ def parse_section_text(text: str) -> List[Dict[str, Any]]:
             cur_lines.append(line)
 
     if not seen_header:
-        # 헤더 없음: 전체를 단일 섹션으로
         body = text.strip()
         return [{"heading_path": [], "level": 0, "text": body, "order": 0}]
 
@@ -96,7 +99,7 @@ def parse_markdown_file(path: str) -> Dict[str, Any]:
     except UnicodeDecodeError:
         text = raw.decode("utf-8", errors="replace")
         replaced = text.count("�")
-        if len(text) > 0 and replaced / len(text) > 0.05:
+        if len(text) > 0 and replaced / len(text) > ENCODING_ERROR_THRESHOLD:
             result["error"] = "encoding error (too many invalid bytes)"
             return result
 

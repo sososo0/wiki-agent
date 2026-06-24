@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import numpy as np
+
 from core.pipeline import dedupe
 from core.pipeline.curate import doc_chunk_entry_id
 
@@ -87,6 +89,64 @@ def test_skip_check_ignores_entries_without_chunk_hash():
         BASE_ENTRY_ID: {
             "status": "active", "version": 1,
             "sources": [{"type": "retrieval_log_query", "query": "x"}],
+        }
+    }
+    result = dedupe.resolve_doc_chunk_op(CANDIDATE, existing)
+    assert result["op"] == "update"
+
+
+def _embed_fn_factory(vector):
+    """[candidate_text] -> [vector]를 흉내내는 스텁(실제 모델 호출 없음)."""
+    return lambda texts: [vector for _ in texts]
+
+
+def test_near_duplicate_skips_when_embedding_similarity_is_high():
+    existing = {
+        BASE_ENTRY_ID: {
+            "status": "active", "version": 1,
+            "sources": [{"type": "document", "chunk_hash": "hash_old"}],
+            "_embedding": np.array([1.0, 0.0]),
+        }
+    }
+    result = dedupe.resolve_doc_chunk_op(
+        CANDIDATE, existing, embed_fn=_embed_fn_factory([0.99, 0.0]), near_duplicate_threshold=0.97)
+    assert result == {"op": "skip_near_duplicate", "entry_id": BASE_ENTRY_ID, "supersedes": None}
+
+
+def test_near_duplicate_falls_through_to_update_when_similarity_is_low():
+    existing = {
+        BASE_ENTRY_ID: {
+            "status": "active", "version": 1,
+            "sources": [{"type": "document", "chunk_hash": "hash_old"}],
+            "_embedding": np.array([1.0, 0.0]),
+        }
+    }
+    result = dedupe.resolve_doc_chunk_op(
+        CANDIDATE, existing, embed_fn=_embed_fn_factory([0.0, 1.0]), near_duplicate_threshold=0.97)
+    assert result["op"] == "update"
+
+
+def test_near_duplicate_check_skipped_when_existing_has_no_embedding():
+    """기존 엔트리에 _embedding이 없으면(검색/그래프를 한 번도 안 거침)
+    embed_fn을 줘도 안전하게 update로 폴백해야 한다."""
+    existing = {
+        BASE_ENTRY_ID: {
+            "status": "active", "version": 1,
+            "sources": [{"type": "document", "chunk_hash": "hash_old"}],
+        }
+    }
+    result = dedupe.resolve_doc_chunk_op(
+        CANDIDATE, existing, embed_fn=_embed_fn_factory([1.0, 0.0]), near_duplicate_threshold=0.97)
+    assert result["op"] == "update"
+
+
+def test_near_duplicate_check_disabled_by_default():
+    """embed_fn을 안 주면(기본 None) 기존 동작과 100% 동일해야 한다."""
+    existing = {
+        BASE_ENTRY_ID: {
+            "status": "active", "version": 1,
+            "sources": [{"type": "document", "chunk_hash": "hash_old"}],
+            "_embedding": np.array([1.0, 0.0]),
         }
     }
     result = dedupe.resolve_doc_chunk_op(CANDIDATE, existing)

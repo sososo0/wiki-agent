@@ -7,3 +7,12 @@ __pycache__/
 .git/
 venv/
 logs/
+
+# 컨테이너 런타임(uvicorn demo.app:app)이 쓰지 않는 개발 전용 파일 — 이미지
+# 크기/빌드 컨텍스트 전송량을 줄인다. scripts/와 eval/은 docker exec로 갱신
+# 사이클/문서 ingestion을 컨테이너 안에서 돌릴 수도 있어 그대로 둔다.
+tests/
+docs/
+.claude/
+*.md
+!README.md

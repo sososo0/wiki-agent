@@ -1,0 +1,11 @@
+# 로컬 개발/테스트 전용 — Docker 런타임 이미지에는 설치하지 않는다(이미지
+# 용량과 무관한 도구라 배포 이미지에 들어갈 이유가 없음).
+#
+# 실행: pip install -r requirements.txt -r requirements-dev.txt
+
+pytest>=8.0
+
+# fastapi.testclient.TestClient가 내부적으로 쓴다 — anthropic SDK가 런타임에
+# httpx를 이미 transitively 끌어오므로(설치되는 패키지는 동일) 이 줄은 실제
+# 용량에 영향은 없지만, "테스트 전용 의존성"이라는 의도를 명시적으로 남긴다.
+httpx>=0.27

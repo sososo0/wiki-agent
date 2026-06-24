@@ -2,6 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wiki-agent</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
@@ -16,11 +17,17 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 12px 20px; background: #fff; border-bottom: 1px solid var(--border);
   }
-  .brand { display: flex; align-items: center; gap: 10px; }
-  .brand .logo { font-size: 22px; }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .brand .logo { font-size: 22px; flex-shrink: 0; }
   .brand h1 { font-size: 16px; margin: 0; }
   .brand p { font-size: 12px; margin: 0; color: #64748b; }
-  .header-actions { display: flex; gap: 8px; position: relative; }
+  .header-actions { display: flex; gap: 8px; position: relative; flex-shrink: 0; }
+  /* 좁은 화면: 부제가 버튼 3개와 한 줄을 다투며 줄바꿈이 들어가 빡빡해지므로
+     부제를 숨기고 헤더 자체도 필요하면 줄바꿈을 허용한다. */
+  @media (max-width: 560px) {
+    .brand p { display: none; }
+    header { flex-wrap: wrap; row-gap: 8px; }
+  }
   #new-chat, #history-toggle, #notif-toggle {
     border: 1px solid var(--border); background: #fff; border-radius: 8px;
     padding: 6px 12px; font-size: 13px; cursor: pointer; color: #374151;
@@ -243,10 +250,16 @@
       위키 항목들이 서로 어떻게 연결되어 있는지, 지금 승격 대기 중인 후보는 무엇인지,
       AI 안전장치(게이트)가 어떤 항목을 막았는지를 시각적으로 보여줍니다.
     </p>
+    <a href="/static/history.html">📈 사이클 추이</a>
+    <p>
+      갱신 사이클이 돌 때마다 골드셋 기준 검색 품질(recall@k, correctness 등)이
+      실제로 어떻게 변해왔는지 시간순으로 보여줍니다.
+    </p>
   </footer>
 
 <script>
   const LS_CONV_ID = "wiki_agent_conv_id";
+  const LS_OWNER_TOKEN = "wiki_agent_owner_token";
   const log = document.getElementById("log");
   const intro = document.getElementById("intro");
   const form = document.getElementById("chat-form");
@@ -254,6 +267,14 @@
 
   let convId = localStorage.getItem(LS_CONV_ID);
   let turnId = 0;
+
+  // 브라우저당 한 번만 발급 — "새 대화"를 눌러도(convId는 바뀜) 안 바뀐다.
+  // /conversations·/history가 이 토큰으로 "내 대화"만 보여주는 데 쓰인다.
+  let ownerToken = localStorage.getItem(LS_OWNER_TOKEN);
+  if (!ownerToken) {
+    ownerToken = crypto.randomUUID();
+    localStorage.setItem(LS_OWNER_TOKEN, ownerToken);
+  }
 
   function hideIntro() {
     intro.style.display = "none";
@@ -285,9 +306,8 @@
   }
 
   // 백엔드는 답변을 한 번에 반환하지만(스트리밍 API 없음), 받은 텍스트를
-  // 일정 글자 수씩 끊어 점진적으로 다시 렌더링해 타이핑되는 듯한 효과를 낸다.
-  // 매 단계마다 누적된 markdown 전체를 다시 파싱하므로 태그가 중간에 끊겨
-  // 깨지는 일이 없다.
+  // 글자 수 단위로 끊어 점진적으로 다시 렌더링해 타이핑 효과를 낸다 —
+  // 매 단계 누적된 markdown 전체를 다시 파싱해 태그가 중간에 끊기지 않는다.
   function revealProgressively(mdEl, fullText, onDone) {
     const steps = 40;
     const chunkSize = Math.max(4, Math.ceil(fullText.length / steps));
@@ -333,11 +353,10 @@
       retrieved.forEach((h, i) => {
         if (i > 0) src.append(", ");
         const a = document.createElement("a");
-        // 그래프 뷰가 ?focus=entry_id를 받으면 해당 노드를 선택/포커스하므로
-        // entry_id 텍스트가 실질적인 "출처 링크" 역할을 한다(전용 상세 페이지는
-        // 없음 — README 참고).
+        // 그래프 뷰의 ?focus=entry_id가 해당 노드를 선택/포커스하므로 이게
+        // 실질적인 "출처 링크" 역할(전용 상세 페이지는 없음). 같은 탭에서
+        // 이동 — 대화는 서버에 남아 있어 "채팅으로 돌아가기"로 복원된다.
         a.href = `/static/graph.html?focus=${encodeURIComponent(h.entry_id)}`;
-        a.target = "_blank";
         a.textContent = h.entry_id;
         src.appendChild(a);
       });
@@ -371,10 +390,9 @@
     });
   }
 
-  // 👎는 바로 전송하지 않고 짧은 이유 후보를 띄운다(피드백 루프 확장 — LLM
-  // 호출 없이 정적 후보만 보여주는 비용 없는 신호 보강). 이유를 골라야
-  // 비로소 /feedback을 호출하므로, 누르고 아무것도 안 고르면 투표 자체가
-  // 기록되지 않는다 — "이유 없이 제출"로 기존과 같은 동작(이유 없는 👎)도 가능.
+  // 👎는 바로 전송하지 않고 짧은 이유 후보를 띄운다(LLM 호출 없는 정적 후보).
+  // 이유를 골라야 /feedback을 호출하므로, 아무것도 안 고르면 투표가 기록되지
+  // 않는다 — "이유 없이 제출"도 옵션으로 둬서 기존 동작(이유 없는 👎)도 가능.
   function showFeedbackReasons(fb, downBtn, upBtn, turn) {
     if (fb.querySelector(".feedback-reasons")) return;
     downBtn.style.opacity = "1";
@@ -408,7 +426,7 @@
     log.innerHTML = "";
     intro.style.display = "";
     try {
-      const resp = await fetch(`/history/${convId}`);
+      const resp = await fetch(`/history/${convId}?owner_token=${encodeURIComponent(ownerToken)}`);
       const data = await resp.json();
       for (const t of data.turns || []) {
         addMessage("user", t.query);
@@ -454,7 +472,7 @@
   async function openHistoryPanel() {
     historyPanel.classList.add("open");
     historyPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
-    const resp = await fetch("/conversations");
+    const resp = await fetch(`/conversations?owner_token=${encodeURIComponent(ownerToken)}`);
     const data = await resp.json();
     const convs = data.conversations || [];
 
@@ -467,10 +485,15 @@
     for (const c of convs) {
       const btn = document.createElement("button");
       btn.className = "history-item" + (c.conv_id === convId ? " active" : "");
-      btn.innerHTML = `
-        <div class="preview">${c.title || c.first_query || "(빈 대화)"}</div>
-        <div class="meta">${fmtTime(c.last_ts)} · ${c.turn_count}턴</div>
-      `;
+      // title/first_query는 사용자가 입력한 채팅 메시지 원문일 수 있어(XSS 방지)
+      // innerHTML 대신 textContent로 삽입한다.
+      const preview = document.createElement("div");
+      preview.className = "preview";
+      preview.textContent = c.title || c.first_query || "(빈 대화)";
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = `${fmtTime(c.last_ts)} · ${c.turn_count}턴`;
+      btn.append(preview, meta);
       btn.addEventListener("click", () => {
         loadConversation(c.conv_id);
         closeHistoryPanel();
@@ -494,9 +517,8 @@
   });
 
   // 갱신 사이클(scripts/run_update_cycle.py) 결과를 보여주는 종모양 알림 —
-  // 데모는 쓰기 도구가 없으므로(notifications 테이블은 그 오프라인 스크립트만
-  // 씀) 여기는 순수 읽기/읽음처리만 한다. 60초 폴링으로 배지를 갱신한다(SSE/
-  // 웹소켓 없이 데모 규모에 맞는 단순한 방식).
+  // notifications 테이블은 그 오프라인 스크립트만 쓰므로 여기는 읽기/읽음처리만
+  // 한다. SSE/웹소켓 없이 60초 폴링으로 배지를 갱신(데모 규모에 맞는 단순한 방식).
   const notifToggle = document.getElementById("notif-toggle");
   const notifPanel = document.getElementById("notif-panel");
   const notifBadge = document.getElementById("notif-badge");
@@ -535,17 +557,38 @@
     for (const n of items) {
       const btn = document.createElement("button");
       btn.className = "notif-item" + (n.read ? "" : " unread");
-      btn.innerHTML = `
-        <div class="row"><span class="dot ${n.level}"></span><span class="title">${n.title}</span></div>
-        <div class="message">${n.message}</div>
-        <div class="meta">${fmtTime(n.created_at)}</div>
-      `;
+      // title/message는 지금은 항상 신뢰된 오프라인 스크립트가 만든 고정 문구지만,
+      // 나중에 동적 텍스트가 들어올 수 있는 sink라 처음부터 textContent로 삽입한다.
+      const row = document.createElement("div");
+      row.className = "row";
+      const dot = document.createElement("span");
+      dot.className = `dot ${n.level}`;
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "title";
+      titleSpan.textContent = n.title;
+      row.append(dot, titleSpan);
+      const messageDiv = document.createElement("div");
+      messageDiv.className = "message";
+      messageDiv.textContent = n.message;
+      const metaDiv = document.createElement("div");
+      metaDiv.className = "meta";
+      metaDiv.textContent = fmtTime(n.created_at);
+      btn.append(row, messageDiv, metaDiv);
       btn.addEventListener("click", async () => {
         if (!n.read) {
-          await fetch(`/notifications/${n.id}/read`, { method: "POST" });
-          btn.classList.remove("unread");
-          n.read = 1;
-          refreshNotifBadge();
+          // 운영자만 의미 있는 동작 — WIKI_AGENT_DEMO_ADMIN_TOKEN이 서버에 설정돼
+          // 있으면 같은 값을 자기 브라우저 devtools로 localStorage에 넣어둬야
+          // 403 없이 동작한다(입력 UI는 일부러 안 둠).
+          const adminToken = localStorage.getItem("wiki_agent_admin_token");
+          const resp = await fetch(`/notifications/${n.id}/read`, {
+            method: "POST",
+            headers: adminToken ? { "X-Admin-Token": adminToken } : {},
+          });
+          if (resp.ok) {
+            btn.classList.remove("unread");
+            n.read = 1;
+            refreshNotifBadge();
+          }
         }
       });
       notifPanel.appendChild(btn);
@@ -569,17 +612,17 @@
   refreshNotifBadge();
   setInterval(refreshNotifBadge, 60000);
 
-  // opencode의 Question System(질문이 모호하면 옵션이 있는 명확화 질문으로
-  // 멈췄다가 답이 오면 재개)을 참고한 되묻기 — 추가 LLM 호출 없이 같은 /chat
-  // 응답 안에서 type:"clarify"로 온다. 사용자가 옵션을 고르면(또는 직접 입력)
-  // "원래 질문 — 선택" 형태로 force_answer:true를 붙여 1회만 더 호출한다
-  // (모호한 질문 1건당 최대 2회 호출로 상한 — 비용 제한과 충돌하지 않음).
+  // 질문이 모호하면 추가 LLM 호출 없이 같은 /chat 응답에서 type:"clarify"로
+  // 온다 — 사용자가 옵션을 고르면 force_answer:true로 1회만 더 호출한다
+  // (모호한 질문 1건당 최대 2회 호출 상한).
   async function sendToChat(message, turn, forceAnswer) {
     const typingEl = addTypingIndicator();
     const resp = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conv_id: convId, turn_id: turn, message, force_answer: forceAnswer }),
+      body: JSON.stringify({
+        conv_id: convId, turn_id: turn, message, force_answer: forceAnswer, owner_token: ownerToken,
+      }),
     });
     const data = await resp.json();
     typingEl.remove();

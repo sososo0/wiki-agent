@@ -2,6 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wiki-agent graph</title>
 <script src="https://unpkg.com/vis-network@9/standalone/umd/vis-network.min.js"></script>
 <style>
@@ -9,31 +10,95 @@
   header { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 16px; }
   header h2 { margin: 0; font-size: 18px; }
   header a { color: #2563eb; text-decoration: none; }
-  #info-toggle {
-    margin-left: auto; border: 1px solid #e2e8f0; background: #fff; border-radius: 8px;
+  /* index.html과 동일한 갱신 알림 종 — 그래프/추이 페이지에서도 같은 갱신
+     사이클 결과를 확인할 수 있게 똑같은 마크업/동작을 둔다. */
+  #notif-wrap { margin-left: auto; position: relative; }
+  #notif-toggle {
+    border: 1px solid #e2e8f0; background: #fff; border-radius: 8px;
     padding: 5px 11px; font-size: 13px; cursor: pointer; color: #374151;
+    position: relative;
   }
-  #info-toggle:hover { background: #f1f5f9; }
+  #notif-toggle:hover { background: #f1f5f9; }
+  #notif-badge {
+    position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px;
+    background: #ef4444; color: #fff; border-radius: 999px; font-size: 10px;
+    line-height: 16px; text-align: center; padding: 0 3px; display: none;
+  }
+  #notif-badge.show { display: block; }
+  #notif-panel {
+    display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 20;
+    width: 340px; max-height: 420px; overflow-y: auto;
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08); padding: 6px;
+  }
+  #notif-panel.open { display: block; }
+  #notif-panel .empty { padding: 14px; font-size: 13px; color: #94a3b8; text-align: center; }
+  .notif-item {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 10px; border-radius: 8px; font-size: 13px; color: #1f2937;
+  }
+  .notif-item:hover { background: #f1f5f9; }
+  .notif-item.unread { background: #eff6ff; }
+  .notif-item .row { display: flex; align-items: center; gap: 6px; }
+  .notif-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .notif-item .dot.info { background: #2563eb; }
+  .notif-item .dot.warning { background: #f59e0b; }
+  .notif-item .dot.error { background: #ef4444; }
+  .notif-item .title { font-weight: 600; }
+  .notif-item .message { margin: 4px 0 0; color: #374151; line-height: 1.4; }
+  .notif-item .meta { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+  /* 채팅의 "근거" 링크(?focus=entry_id)로 들어왔을 때만 보이는, 더 눈에 띄는
+     복귀 안내 — 헤더의 작은 "← 채팅으로" 링크보다 맥락이 분명하다. */
+  #focus-banner {
+    display: none; background: #eff6ff; border-bottom: 1px solid #bfdbfe;
+    padding: 10px 16px; font-size: 13px; color: #1e40af;
+    align-items: center; gap: 8px;
+  }
+  #focus-banner a {
+    color: #fff; background: #2563eb; text-decoration: none; font-weight: 600;
+    padding: 4px 10px; border-radius: 6px; font-size: 12px;
+  }
+  #focus-banner a:hover { background: #1d4ed8; }
+  #graph-toolbar {
+    position: absolute; top: 10px; right: 10px; z-index: 10;
+    display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;
+    max-width: calc(100vw - 20px);
+  }
+  #info-toggle, #reset-clusters, #back-to-overview {
+    border: 1px solid #e2e8f0; background: #fff; border-radius: 8px;
+    padding: 5px 11px; font-size: 13px; cursor: pointer; color: #374151;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  }
+  #info-toggle:hover, #reset-clusters:hover, #back-to-overview:hover { background: #f1f5f9; }
 
   #info {
-    border-bottom: 1px solid #e2e8f0; padding: 16px 20px; background: #f8fafc;
-    font-size: 13px; color: #374151; line-height: 1.6;
+    border-bottom: 1px solid #e2e8f0; padding: 8px 20px; background: #f8fafc;
+    font-size: 12px; color: #374151; line-height: 1.3;
   }
-  #info p { margin: 0 0 12px; max-width: 760px; }
-  #info .legend-groups { display: flex; gap: 28px; flex-wrap: wrap; }
-  #info .legend-group h4 { margin: 0 0 6px; font-size: 12px; color: #64748b; text-transform: uppercase; }
-  #info .legend-group div { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  #info p { margin: 0 0 6px; max-width: 760px; }
+  #info .legend-groups { display: flex; gap: 24px; flex-wrap: wrap; }
+  #info .legend-group h4 { margin: 0 0 3px; font-size: 11px; color: #64748b; text-transform: uppercase; }
+  #info .legend-group div { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .line { width: 22px; height: 0; border-top: 2px solid; display: inline-block; flex-shrink: 0; }
 
   #wrap { display: flex; flex: 1; min-height: 0; }
   body { display: flex; flex-direction: column; height: 100vh; }
-  #network { flex: 1; }
+  #network-wrap { position: relative; flex: 1; }
+  /* 순백색 배경 위에서는 옅은 색(연관 엣지·shadow/deprecated 노드)과 라벨
+     텍스트가 묻혀 잘 안 보인다 — 살짝 톤을 낮춰 대비를 준다. */
+  #network { position: absolute; inset: 0; background: #f8fafc; }
   #panel { width: 320px; border-left: 1px solid #e2e8f0; padding: 16px; overflow-y: auto; font-size: 14px; }
   #panel h3 { margin-top: 0; }
   #panel .field { margin-bottom: 10px; }
   #panel .field b { display: block; color: #64748b; font-size: 12px; text-transform: uppercase; }
   #empty-hint { color: #94a3b8; }
+  /* 엣지 상세 패널에서 연결된 노드 이름을 클릭하면 그 노드로 포커스 이동 —
+     header a와 같은 링크 색을 재사용해 새 시각 언어를 추가하지 않는다. */
+  .node-link {
+    border: none; background: none; padding: 0; font: inherit;
+    color: #2563eb; text-decoration: underline; cursor: pointer;
+  }
 
   #entry-list-wrap {
     width: 260px; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column;
@@ -50,21 +115,52 @@
   #entry-list button:hover { background: #f1f5f9; }
   #entry-list button.active { background: #eff6ff; color: #2563eb; font-weight: 600; }
   #entry-list .entry-id { display: block; font-size: 11px; color: #94a3b8; }
+
+  /* 좁은 화면: 3컬럼(목록 260px + 그래프 + 상세 320px)이 나란히 있으면 그래프
+     자체가 쓸 수 있는 너비가 너무 좁아진다(실측: 768px에서 약 188px로
+     짜부라짐) — 숨김 토글이 아니라, 목록+상세를 같은 한쪽 컬럼에 위/아래로
+     합쳐 그래프와 항상 동시에 보이는 2컬럼으로 재배치한다(그래프/설명/목록이
+     화면 하나에 같이 있어야 한다는 요구 — 가리는 대신 자리만 옮김). */
+  @media (max-width: 860px) {
+    #wrap {
+      display: grid; grid-template-columns: min(45%, 260px) 1fr;
+      grid-template-rows: 1fr 1fr; grid-template-areas: "list network" "panel network";
+    }
+    /* grid item의 기본 min-height:auto는 내용(목록 전체/긴 본문)의 max-content
+       높이까지 늘어나려 해서 1fr 행이 무시된 채 컬럼이 22000px+로 길어지는
+       문제가 있었다(flex의 min-width:auto와 같은 함정) — 0으로 눌러야 1fr
+       행 높이로 실제로 잘리고 내부 overflow-y:auto가 스크롤을 맡는다. */
+    #entry-list-wrap {
+      grid-area: list; width: auto; max-width: none; min-height: 0;
+      border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0;
+    }
+    #network-wrap { grid-area: network; }
+    #panel {
+      grid-area: panel; width: auto; max-width: none; min-height: 0;
+      border-left: 1px solid #e2e8f0; border-top: none;
+    }
+  }
 </style>
 </head>
 <body>
 <header>
   <h2>wiki-agent graph</h2>
   <a href="/">← 채팅으로</a>
-  <button id="info-toggle" type="button">ℹ️ 설명 숨기기</button>
+  <a href="/static/history.html">📈 사이클 추이</a>
+  <div id="notif-wrap">
+    <button id="notif-toggle" type="button">🔔<span id="notif-badge"></span></button>
+    <div id="notif-panel"></div>
+  </div>
 </header>
+<div id="focus-banner">
+  <span>채팅 답변의 근거를 보여주는 중입니다.</span>
+  <a href="/">💬 채팅으로 돌아가기</a>
+</div>
 <div id="info">
   <p>
-    이 페이지는 자가 갱신형 위키의 현재 상태를 그래프로 보여줍니다. 각 점(노드)은 위키
-    항목 하나이고, 항목 간 선(엣지)은 "이 항목이 다른 항목을 대체하려는 후보다" 같은
-    구조적 관계나 "두 항목이 의미적으로 비슷하다"는 관계를 나타냅니다. 이를 통해 AI가
-    어떤 항목을 새로 만들었는지, 무엇을 승격 대기 중인지, 안전장치(게이트)가 무엇을
-    막았는지를 한눈에 볼 수 있습니다.
+    위키의 현재 상태를 그래프로 보여줍니다. 비슷한 항목들은 <b>큰 대표(backbone) 노드</b>로
+    먼저 묶여 보이고, 클릭하면 그 안의 항목들"만" 펼쳐져 연결을 볼 수 있습니다
+    ("← 전체로 돌아가기"로 복귀).
   </p>
   <div class="legend-groups">
     <div class="legend-group">
@@ -78,7 +174,8 @@
       <h4>엣지 종류 (항목 간 관계)</h4>
       <div><span class="line" style="border-color:#f59e0b"></span>pending_update — shadow 항목이 대체하려는 active 항목을 가리킴(승격 대기)</div>
       <div><span class="line" style="border-color:#94a3b8"></span>superseded_by — deprecated 항목이 과거에 대체했던 대상을 가리킴(교체 이력)</div>
-      <div><span class="line" style="border-color:#cbd5e1"></span>similar — 두 항목의 내용이 임베딩 기준 서로 비슷함(방향 없음, 선이 두꺼울수록 더 비슷함)</div>
+      <div><span class="line" style="border-color:#cbd5e1"></span>similar — 두 항목의 내용이 임베딩 기준 서로 비슷함(방향 없음, 선이 두껍고 진할수록 더 비슷함)</div>
+      <div><span class="line" style="border-color:#1e3a8a"></span>cluster_similar — 큰 주제(backbone) 노드끼리도 서로 얼마나 비슷한지 나타냄</div>
     </div>
   </div>
 </div>
@@ -87,7 +184,14 @@
     <input id="entry-list-search" type="text" placeholder="🔍 위키 항목 검색...">
     <div id="entry-list"></div>
   </div>
-  <div id="network"></div>
+  <div id="network-wrap">
+    <div id="graph-toolbar">
+      <button id="info-toggle" type="button">ℹ️ 설명 숨기기</button>
+      <button id="reset-clusters" type="button">⟳ 초기 화면으로</button>
+      <button id="back-to-overview" type="button" style="display:none">← 전체로 돌아가기</button>
+    </div>
+    <div id="network"></div>
+  </div>
   <div id="panel"><p id="empty-hint">노드를 클릭하면 상세 정보가 표시됩니다.</p></div>
 </div>
 
@@ -100,47 +204,209 @@
   };
 
   const EDGE_STYLE = {
-    pending_update: { color: "#f59e0b", dashes: true, arrows: "to" },
-    superseded_by:  { color: "#94a3b8", dashes: true, arrows: "to" },
-    similar:        { color: "#cbd5e1", dashes: false, arrows: "" },
+    pending_update:  { color: "#f59e0b", dashes: true, arrows: "to" },
+    superseded_by:   { color: "#94a3b8", dashes: true, arrows: "to" },
+    similar:         { color: "#cbd5e1", dashes: false, arrows: "" },
+    cluster_similar: { color: "#1e3a8a", dashes: false, arrows: "" },
   };
+
+  // 상태/출처 값은 고정된 몇 개뿐이라(자유 텍스트 아님) 상세 패널에 표시할 때
+  // 안전하게 한글로 바꿔도 된다 — 위키 본문(topic/canonical/body_md) 자체는
+  // 검색/평가에 쓰이는 원본이라 건드리지 않는다.
+  const STATUS_LABEL = {
+    active: "활성", shadow: "대기중(shadow)", deprecated: "강등됨", rejected: "거부됨",
+  };
+  const PROVENANCE_LABEL = {
+    doc_verified: "문서 검증됨", curated_from_logs: "대화 로그 기반 생성",
+    curated_from_web: "웹 검색 기반 생성", agent_generated: "AI 생성(미검증)",
+  };
+
+  const NARROW_MEDIA = window.matchMedia("(max-width: 860px)");
+
+  // #info 범례에 이미 있는 문구를 그대로 옮긴 것 — 엣지 상세 패널에서도 같은
+  // 설명을 보여주기 위함(새로 지어내지 않음).
+  const EDGE_TYPE_LABEL = {
+    pending_update: "승격 대기", superseded_by: "교체 이력",
+    similar: "유사 항목", cluster_similar: "주제 간 유사",
+  };
+  const EDGE_TYPE_DESC = {
+    pending_update: "shadow 항목이 대체하려는 active 항목을 가리킴(승격 대기)",
+    superseded_by: "deprecated 항목이 과거에 대체했던 대상을 가리킴(교체 이력)",
+    similar: "두 항목의 내용이 임베딩 기준 서로 비슷함(방향 없음)",
+    cluster_similar: "큰 주제(backbone) 노드끼리도 서로 얼마나 비슷한지 나타냄",
+  };
+
+  // similar/cluster_similar의 weight는 core/graph.py의 기본
+  // similarity_threshold=0.3 때문에 실제로 [0.3, 1.0] 범위에서만 나온다(그
+  // 밑은 엣지 자체가 생성되지 않음) — 0~1 균등 3분할 대신 그 범위에 맞춘
+  // 경계값을 쓴다.
+  function similarityBucket(weight) {
+    if (weight >= 0.75) return "매우 높음";
+    if (weight >= 0.5) return "높음";
+    return "보통";
+  }
+
+  // /graph 응답, 현재 vis.Network, 지금 화면이 전체 backbone인지 특정
+  // 클러스터("detail:"+cluster_id)인지 — 클릭/검색/뒤로가기가 다 공유해야
+  // 해서 모듈 최상위에 둔다.
+  let data = null;
+  let network = null;
+  let currentView = "overview";
 
   function toVisNode(n) {
     const style = STATUS_STYLE[n.status] || STATUS_STYLE.active;
     return {
       id: n.id,
-      label: n.topic || n.id,
+      label: n.topic_ko || n.topic || n.id,
       shape: "dot",
       size: 14,
+      // 클러스터 상세 화면에서도 그 클러스터의 대표였던 노드를 구분할 수 있게
+      // 테두리를 두껍게 — cluster_size===1(클러스터링 자체가 안 된 단일 노드)는
+      // is_backbone이어도 구분할 의미가 없어 제외.
+      borderWidth: n.is_backbone && n.cluster_size > 1 ? 3 : 1,
       ...style,
-      raw: n,
+      cluster_id: n.cluster_id,
     };
+  }
+
+  // 클러스터 대표 노드는 backbone 색으로 덮어쓴다. "cluster:" 접두사 붙인
+  // 합성 id를 쓰는 이유: 대표 노드의 실제 id를 재사용하면 joinCondition이
+  // 멤버에서 빼는 동시에 같은 id의 새 클러스터 노드가 추가돼 충돌,
+  // network.cluster()가 예외를 던지고 렌더링이 멈췄었다.
+  function applyClustering(network, clusters) {
+    for (const c of clusters) {
+      try {
+        // c.label은 백엔드가 영어 topic으로 채워 보낸다 — 대표 노드의 한글
+        // 번역이 있으면 그걸로 덮어써서 클러스터 라벨도 한글로 보이게 한다.
+        const rep = data.nodes.find((n) => n.id === c.cluster_id);
+        const label = (rep && rep.topic_ko) || c.label;
+        network.cluster({
+          joinCondition: (opts) => opts.cluster_id === c.cluster_id,
+          clusterNodeProperties: {
+            id: "cluster:" + c.cluster_id,
+            label: `${label} (+${c.size - 1})`,
+            shape: "dot",
+            size: 14 + Math.min(24, c.size),
+            color: { background: "#1e3a8a", border: "#1e3a8a" },
+            // 이전엔 흰 글씨였는데, vis-network가 라벨을 노드 안이 아니라 노드
+            // 아래(배경=흰색 캔버스)에 그려서 흰 글씨가 그대로 안 보이는 버그가
+            // 있었다 — 전역 기본 폰트(아래 new vis.Network options)와 통일.
+          },
+        });
+      } catch (err) {
+        // 클러스터링은 기본 그래프 위의 부가 기능이므로, 일부가 실패해도
+        // 평면 그래프 렌더링 자체는 멈추지 않게 한다.
+        console.error("cluster failed for", c.cluster_id, err);
+      }
+    }
   }
 
   function toVisEdge(e, idx) {
     const style = EDGE_STYLE[e.type] || EDGE_STYLE.similar;
+    const isSimilarLike = e.type === "similar" || e.type === "cluster_similar";
+    // weight 분포가 threshold 근처(0.3~0.6)에 몰려 있어 두께만으로는(예:
+    // weight*4 -> 1.2~2.4px) 잘 안 보인다 — 두께를 더 가파르게 키우고
+    // 불투명도도 같이 바꿔 두 채널로 강약을 구별한다.
+    const width = isSimilarLike ? 1 + e.weight * 7 : 2;
+    const opacity = isSimilarLike ? Math.max(0.25, Math.min(1, e.weight)) : 1;
     return {
       id: idx,
       from: e.source,
       to: e.target,
-      width: e.type === "similar" ? Math.max(1, e.weight * 4) : 2,
       ...style,
+      width,
+      color: isSimilarLike ? { color: style.color, opacity } : style.color,
     };
   }
 
   function renderDetail(n) {
     const panel = document.getElementById("panel");
-    panel.innerHTML = `
-      <h3>${n.topic || n.id}</h3>
-      <div class="field"><b>entry_id</b>${n.id}</div>
-      <div class="field"><b>status</b>${n.status}</div>
-      <div class="field"><b>canonical</b>${n.canonical || ""}</div>
-      <div class="field"><b>body_md</b>${n.body_md || ""}</div>
-      <div class="field"><b>provenance</b>${n.provenance || ""}</div>
-      <div class="field"><b>confidence</b>${n.confidence ?? ""}</div>
-      ${n.rejected_reason ? `<div class="field"><b>rejected_reason</b>${n.rejected_reason}</div>` : ""}
-    `;
+    panel.innerHTML = "";
+
+    // topic/canonical/body_md/rejected_reason은 사용자 채팅 질문이나 웹검색
+    // 콘텐츠를 근거로 LLM이 작성한 텍스트라 그대로 신뢰할 수 없다(XSS 방지) —
+    // innerHTML 템플릿 대신 textContent로만 채운다.
+    function addField(label, value) {
+      const div = document.createElement("div");
+      div.className = "field";
+      const b = document.createElement("b");
+      b.textContent = label;
+      div.append(b, value ?? "");
+      panel.appendChild(div);
+    }
+
+    const h3 = document.createElement("h3");
+    h3.textContent = n.topic_ko || n.topic || n.id;
+    panel.appendChild(h3);
+
+    addField("항목 ID", n.id);
+    addField("상태", STATUS_LABEL[n.status] || n.status);
+    addField("한 줄 요약", n.canonical_ko || n.canonical || "");
+    addField("본문", n.body_md_ko || n.body_md || "");
+    addField("출처", PROVENANCE_LABEL[n.provenance] || n.provenance || "");
+    addField("신뢰도", n.confidence ?? "");
+    if (n.rejected_reason) addField("거부 이유", n.rejected_reason);
   }
+
+  // 엣지(관계)를 클릭했을 때 같은 #panel에 보여줄 상세 정보 — 어떤 두 노드를
+  // 연결하는지(클릭하면 그 노드로 포커스 이동), 관계 종류, 관계의 정도.
+  function renderEdgeDetail(edge) {
+    const panel = document.getElementById("panel");
+    panel.innerHTML = "";
+
+    function addField(label, value) {
+      const div = document.createElement("div");
+      div.className = "field";
+      const b = document.createElement("b");
+      b.textContent = label;
+      div.append(b, value ?? "");
+      panel.appendChild(div);
+    }
+
+    // topic_ko/topic은 LLM 생성 텍스트라 textContent로만 채운다(renderDetail과
+    // 동일한 보안 원칙) — 클릭하면 그 노드로 포커스 이동(focusNode 재사용).
+    function addNodeLinkField(label, node, fallbackId) {
+      const div = document.createElement("div");
+      div.className = "field";
+      const b = document.createElement("b");
+      b.textContent = label;
+      div.appendChild(b);
+      if (node) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "node-link";
+        btn.textContent = node.topic_ko || node.topic || node.id;
+        btn.addEventListener("click", () => focusNode(node.id));
+        div.appendChild(btn);
+      } else {
+        div.append(fallbackId);
+      }
+      panel.appendChild(div);
+    }
+
+    const sourceNode = data.nodes.find((n) => n.id === edge.source);
+    const targetNode = data.nodes.find((n) => n.id === edge.target);
+
+    const h3 = document.createElement("h3");
+    h3.textContent = "관계 상세";
+    panel.appendChild(h3);
+
+    addNodeLinkField("연결된 항목 1", sourceNode, edge.source);
+    addNodeLinkField("연결된 항목 2", targetNode, edge.target);
+    addField("관계 종류", EDGE_TYPE_LABEL[edge.type] || edge.type);
+    addField("설명", EDGE_TYPE_DESC[edge.type] || "");
+
+    const isSimilarLike = edge.type === "similar" || edge.type === "cluster_similar";
+    addField(
+      "관계의 정도",
+      isSimilarLike
+        ? `${edge.weight.toFixed(2)} (${similarityBucket(edge.weight)})`
+        : "구조적 관계 (유사도 측정값 아님)"
+    );
+  }
+
+  document.getElementById("reset-clusters").addEventListener("click", () => location.reload());
+  document.getElementById("back-to-overview").addEventListener("click", () => renderOverview());
 
   const infoToggle = document.getElementById("info-toggle");
   const infoPanel = document.getElementById("info");
@@ -149,23 +415,34 @@
     infoPanel.style.display = hidden ? "" : "none";
     infoToggle.textContent = hidden ? "ℹ️ 설명 숨기기" : "ℹ️ 설명 보기";
   });
+  // 좁은 화면에서는 범례가 그래프 영역을 거의 다 차지하므로 기본 접어둔다
+  // (버튼으로 언제든 다시 펼칠 수 있음 — 위 핸들러 그대로 재사용).
+  if (NARROW_MEDIA.matches) {
+    infoPanel.style.display = "none";
+    infoToggle.textContent = "ℹ️ 설명 보기";
+  }
 
   function buildEntryList(nodes, onSelect) {
     const listEl = document.getElementById("entry-list");
     const searchEl = document.getElementById("entry-list-search");
     const sorted = [...nodes].sort((a, b) =>
-      (a.topic || a.id).localeCompare(b.topic || b.id));
+      (a.topic_ko || a.topic || a.id).localeCompare(b.topic_ko || b.topic || b.id));
 
     function render(filter) {
       listEl.innerHTML = "";
       const q = (filter || "").toLowerCase();
       for (const n of sorted) {
-        const label = n.topic || n.id;
-        if (q && !label.toLowerCase().includes(q) && !n.id.toLowerCase().includes(q)) continue;
+        const label = n.topic_ko || n.topic || n.id;
+        // 한글 번역만 보이더라도 영어 원문/id로도 검색할 수 있게 둘 다 비교.
+        const haystack = `${label} ${n.topic || ""} ${n.id}`.toLowerCase();
+        if (q && !haystack.includes(q)) continue;
         const btn = document.createElement("button");
         btn.type = "button";
         btn.dataset.id = n.id;
-        btn.innerHTML = `${label}<span class="entry-id">${n.id}</span>`;
+        const idSpan = document.createElement("span");
+        idSpan.className = "entry-id";
+        idSpan.textContent = n.id;
+        btn.append(label, idSpan);  // label은 textContent와 동등하게 안전한 문자열 노드로 추가됨
         btn.addEventListener("click", () => onSelect(n.id));
         listEl.appendChild(btn);
       }
@@ -181,40 +458,122 @@
     });
   }
 
+  // 전체 backbone 화면: 클러스터링을 다시 적용해 대표 노드 + cluster_similar
+  // 엣지만 눈에 띄게 보여준다(같은 클러스터 멤버끼리의 similar 엣지는
+  // network.cluster()가 대표 노드 안으로 흡수해서 자동으로 숨겨준다).
+  function renderOverview() {
+    currentView = "overview";
+    network.setData({
+      nodes: new vis.DataSet(data.nodes.map(toVisNode)),
+      edges: new vis.DataSet(data.edges.map(toVisEdge)),
+    });
+    applyClustering(network, data.clusters || []);
+    document.getElementById("back-to-overview").style.display = "none";
+  }
+
+  // 클러스터 상세 화면: 클러스터링을 쓰지 않고, 그 클러스터 멤버만으로 완전히
+  // 새 데이터셋을 만든다(vis-network의 합성 클러스터 노드를 숨기는 API에
+  // 의존하지 않아 더 단순/안전함). cluster_similar(다른 클러스터로 나가는
+  // 엣지)는 제외해 "이 클러스터 안의 데이터들만" 연결되어 보이게 한다.
+  function renderClusterDetail(repId) {
+    const cluster = (data.clusters || []).find((c) => c.cluster_id === repId);
+    const memberIds = new Set(cluster ? cluster.member_ids : [repId]);
+    currentView = "detail:" + repId;
+
+    const filteredNodes = data.nodes.filter((n) => memberIds.has(n.id));
+    const filteredEdges = data.edges.filter(
+      (e) => e.type !== "cluster_similar" && memberIds.has(e.source) && memberIds.has(e.target)
+    );
+    network.setData({
+      nodes: new vis.DataSet(filteredNodes.map(toVisNode)),
+      edges: new vis.DataSet(filteredEdges.map(toVisEdge)),
+    });
+    document.getElementById("back-to-overview").style.display = "inline-block";
+  }
+
+  function focusNode(id) {
+    const n = data.nodes.find((x) => x.id === id);
+    if (!n) return;
+    const targetView = n.cluster_size > 1 ? "detail:" + n.cluster_id : "overview";
+    if (currentView !== targetView) {
+      if (n.cluster_size > 1) renderClusterDetail(n.cluster_id);
+      else renderOverview();
+    }
+    // 안정화(stabilization) 이벤트명에 의존하지 않고, 새 데이터셋의 초기
+    // 레이아웃이 자리잡을 정도의 짧은 지연 후 포커스한다(레이아웃 전에
+    // focus()를 호출하면 좌표가 아직 확정되지 않아 카메라 이동이 부정확함).
+    setTimeout(() => {
+      if (!network.findNode(id).length) return;
+      network.selectNodes([id]);
+      network.focus(id, { scale: 1.2, animation: { duration: 400, easingFunction: "easeInOutQuad" } });
+      renderDetail(n);
+      setActiveListItem(id);
+    }, 300);
+  }
+
   async function main() {
     const resp = await fetch("/graph");
-    const data = await resp.json();
+    data = await resp.json();
 
     if (!data.nodes.length) {
       document.getElementById("empty-hint").textContent = "아직 위키 엔트리가 없습니다.";
       return;
     }
 
-    const nodes = new vis.DataSet(data.nodes.map(toVisNode));
-    const edges = new vis.DataSet(data.edges.map(toVisEdge));
-    const network = new vis.Network(
+    network = new vis.Network(
       document.getElementById("network"),
-      { nodes, edges },
+      { nodes: new vis.DataSet([]), edges: new vis.DataSet([]) },
       {
-        physics: { stabilization: true },
+        // 기본 물리 설정(약한 반발력 + avoidOverlap 0)은 큰 그래프에서 노드가
+        // 너무 뭉쳐 구분이 안 됐다 — 반발력/스프링 길이를 늘리고 avoidOverlap을
+        // 켠다.
+        physics: {
+          stabilization: { iterations: 300 },
+          barnesHut: {
+            gravitationalConstant: -12000,
+            springLength: 160,
+            springConstant: 0.03,
+            avoidOverlap: 0.8,
+          },
+        },
         interaction: { hover: true },
         edges: { smooth: false },
+        // 라벨은 진한 텍스트 + 흰 테두리(halo)로 통일 — vis-network가 라벨을
+        // 노드 위가 아니라 옆/아래의 옅은 캔버스 배경에 그릴 때도(클러스터
+        // 대표 노드처럼 진한 배경을 기대하고 흰 글씨를 쓰면 거기선 안 보임),
+        // 테두리가 있으면 밝든 어둡든 배경과 상관없이 읽힌다.
+        nodes: {
+          font: { color: "#1e293b", strokeWidth: 3, strokeColor: "#f8fafc" },
+        },
       }
     );
 
-    function focusNode(id) {
-      if (!nodes.get(id)) return;
-      network.selectNodes([id]);
-      network.focus(id, { scale: 1.2, animation: { duration: 400, easingFunction: "easeInOutQuad" } });
-      renderDetail(nodes.get(id).raw);
-      setActiveListItem(id);
-    }
-
     network.on("click", (params) => {
-      if (!params.nodes.length) return;
-      renderDetail(nodes.get(params.nodes[0]).raw);
-      setActiveListItem(params.nodes[0]);
+      // 노드가 잡히면 항상 노드 클릭을 우선한다(엣지 분기는 노드가 전혀 안
+      // 잡혔을 때만 평가) — 같은 지점에 둘 다 걸리는 경우를 안전하게 처리.
+      if (params.nodes.length) {
+        const id = params.nodes[0];
+        if (network.isCluster(id)) {
+          const repId = id.startsWith("cluster:") ? id.slice("cluster:".length) : id;
+          renderClusterDetail(repId);
+          return;
+        }
+        const n = data.nodes.find((x) => x.id === id);
+        if (n) {
+          renderDetail(n);
+          setActiveListItem(id);
+        }
+        return;
+      }
+      if (params.edges.length) {
+        // toVisEdge(e, idx)가 id: idx로 세팅했으므로 data.edges의 같은
+        // 인덱스를 그대로 조회하면 된다(별도 id 매핑 불필요).
+        const e = data.edges[params.edges[0]];
+        if (e) renderEdgeDetail(e);
+      }
     });
+
+    renderOverview();
 
     // 알파벳순(topic 기준) 위키 목록 — 클릭하면 그래프에서 해당 노드가 선택/포커스됨.
     buildEntryList(data.nodes, focusNode);
@@ -223,12 +582,107 @@
     // 해당 노드를 자동으로 선택/포커스해 보여준다 — 이게 출처 "링크화"의 실체.
     const focusId = new URLSearchParams(location.search).get("focus");
     if (focusId) {
-      // 안정화(stabilization) 이벤트명에 의존하지 않고, 초기 레이아웃이 자리잡을
-      // 정도의 짧은 지연 후 포커스한다(레이아웃 전에 focus()를 호출하면 좌표가
-      // 아직 확정되지 않아 카메라 이동이 부정확할 수 있음).
       setTimeout(() => focusNode(focusId), 300);
+      document.getElementById("focus-banner").style.display = "flex";
     }
   }
+
+  // index.html과 동일한 갱신 알림 종 — notifications 테이블은 오프라인
+  // 스크립트만 쓰므로 여기는 읽기/읽음처리만 한다. 60초 폴링.
+  function fmtNotifTime(ts) {
+    return new Date(ts * 1000).toLocaleString("ko-KR", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+  }
+
+  const notifToggle = document.getElementById("notif-toggle");
+  const notifPanel = document.getElementById("notif-panel");
+  const notifBadge = document.getElementById("notif-badge");
+
+  function closeNotifPanel() {
+    notifPanel.classList.remove("open");
+  }
+
+  async function refreshNotifBadge() {
+    try {
+      const resp = await fetch("/notifications");
+      const data = await resp.json();
+      if (data.unread_count > 0) {
+        notifBadge.textContent = data.unread_count > 99 ? "99+" : data.unread_count;
+        notifBadge.classList.add("show");
+      } else {
+        notifBadge.classList.remove("show");
+      }
+      return data.notifications || [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function openNotifPanel() {
+    notifPanel.classList.add("open");
+    notifPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
+    const items = await refreshNotifBadge();
+
+    if (!items.length) {
+      notifPanel.innerHTML = '<div class="empty">알림이 없습니다.</div>';
+      return;
+    }
+
+    notifPanel.innerHTML = "";
+    for (const n of items) {
+      const btn = document.createElement("button");
+      btn.className = "notif-item" + (n.read ? "" : " unread");
+      // title/message는 textContent로만 채운다(나중에 동적 텍스트가 들어올 sink).
+      const row = document.createElement("div");
+      row.className = "row";
+      const dot = document.createElement("span");
+      dot.className = `dot ${n.level}`;
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "title";
+      titleSpan.textContent = n.title;
+      row.append(dot, titleSpan);
+      const messageDiv = document.createElement("div");
+      messageDiv.className = "message";
+      messageDiv.textContent = n.message;
+      const metaDiv = document.createElement("div");
+      metaDiv.className = "meta";
+      metaDiv.textContent = fmtNotifTime(n.created_at);
+      btn.append(row, messageDiv, metaDiv);
+      btn.addEventListener("click", async () => {
+        if (!n.read) {
+          const adminToken = localStorage.getItem("wiki_agent_admin_token");
+          const resp = await fetch(`/notifications/${n.id}/read`, {
+            method: "POST",
+            headers: adminToken ? { "X-Admin-Token": adminToken } : {},
+          });
+          if (resp.ok) {
+            btn.classList.remove("unread");
+            n.read = 1;
+            refreshNotifBadge();
+          }
+        }
+      });
+      notifPanel.appendChild(btn);
+    }
+  }
+
+  notifToggle.addEventListener("click", () => {
+    if (notifPanel.classList.contains("open")) {
+      closeNotifPanel();
+    } else {
+      openNotifPanel();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!notifPanel.contains(e.target) && e.target !== notifToggle) {
+      closeNotifPanel();
+    }
+  });
+
+  refreshNotifBadge();
+  setInterval(refreshNotifBadge, 60000);
 
   main();
 </script>
