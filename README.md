@@ -134,6 +134,7 @@ WIKI_AGENT_DB=/tmp/demo.db python scripts/ingest_doc.py docs/ --daily-cap 5
 - 구현 순서: [docs/wiki-agent-implementation-guide.md](docs/wiki-agent-implementation-guide.md)
 - MCP-Hermes 서빙 연결: [docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md)
 - 데모 운영 디테일(요청 제한/보안/알림/그래프/평가 사례): [docs/demo-operations.md](docs/demo-operations.md)
+- EC2 배포: [docs/RUNBOOK-ec2-deploy.md](docs/RUNBOOK-ec2-deploy.md)
 
 ## 현재 상태
 
@@ -150,7 +151,7 @@ WIKI_AGENT_DB=/tmp/demo.db python scripts/ingest_doc.py docs/ --daily-cap 5
 - **데모 웹앱** — FastAPI 채팅(`/chat`) + 피드백(`/feedback`), 명확화 질문 되묻기,
   비용 캡(일일/대화/IP), 그래프(`/static/graph.html`)·갱신 추이(`/static/history.html`)
   시각화, 갱신 알림(🔔). `Dockerfile`로 컨테이너 빌드.
-- **갱신 사이클 자동 실행** — Hermes cron으로 매일 새벽 2시 자동 트리거(설정은
+- **갱신 사이클 자동 실행** — Hermes cron으로 6시간마다 자동 트리거(설정은
   [docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md)).
 - **인증/보안** — 대화 조회를 `owner_token`으로 소유자 범위 제한, 알림 읽음 처리
   관리자 토큰 게이트, stored XSS 수정.
