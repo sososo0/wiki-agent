@@ -101,7 +101,7 @@ Question System 패턴 참고). **추가 LLM 호출 없이** 같은 1회 호출 
 
 ## 갱신 사이클 알림(🔔) / 추이(📈)
 
-`run_update_cycle.py`가 Hermes cron으로 매일 새벽 2시 자동 실행되는데, 로그 파일에만
+`run_update_cycle.py`가 Hermes cron으로 6시간마다 자동 실행되는데, 로그 파일에만
 남으면 아무도 안 본다. 그래서 사이클이 끝날 때마다 `run_cycle()`이 이미 들고 있는
 구조화된 결과(mined/feedback/shadow_written/promote)에서 **직접**(텍스트 파싱 없이)
 알림 0~2건을 만들어 `notifications` 테이블에 적재(`summary_notifications()`):
