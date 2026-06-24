@@ -177,14 +177,14 @@
   <p id="no-match-hint" style="display:none; color:#94a3b8;">필터에 맞는 사이클이 없습니다.</p>
 </div>
 <div id="detail-panel">
-  <p id="detail-hint">표에서 사이클(행)을 클릭하면 여기에 설명이 표시됩니다.</p>
+  <p id="detail-hint">표에서 사이클을 체크하면 여기에 설명이 표시됩니다(2개 이상 체크하면 비교 화면).</p>
 </div>
 </div>
 
 <script>
   function fmtDate(ts) {
     if (!ts) return "";
-    return new Date(ts * 1000).toLocaleDateString("ko-KR", { month: "2-digit", day: "2-digit" });
+    return new Date(ts * 1000).toLocaleDateString("ko-KR", { year: "numeric", month: "2-digit", day: "2-digit" });
   }
 
   function fmtClock(ts) {
