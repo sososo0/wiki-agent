@@ -4,4 +4,6 @@ __pycache__/
 .pytest_cache/
 *.db
 *.db.backup-*
+*.db-shm
+*.db-wal
 logs/

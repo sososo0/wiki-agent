@@ -15,12 +15,16 @@ import re
 import json
 import time
 import sqlite3
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+
+import numpy as np
 
 try:
     from core import retrieval
+    from core.lru_cache import LRUCache
 except ImportError:        # python core/wiki_store.py 로 직접 실행할 때
     import retrieval
+    from lru_cache import LRUCache
 
 DB_PATH = os.environ.get("WIKI_AGENT_DB", "wiki_agent.db")
 
@@ -30,7 +34,7 @@ CREATE TABLE IF NOT EXISTS wiki_entry (
   topic       TEXT NOT NULL,
   canonical   TEXT NOT NULL,
   body_md     TEXT,
-  provenance  TEXT DEFAULT 'doc_verified',   -- doc_verified | curated_from_logs | agent_generated
+  provenance  TEXT DEFAULT 'doc_verified',   -- doc_verified | curated_from_logs | curated_from_web | agent_generated
   confidence  REAL DEFAULT 1.0,
   version     INTEGER DEFAULT 1,
   status      TEXT DEFAULT 'active',          -- active | shadow | deprecated
@@ -98,6 +102,43 @@ CREATE TABLE IF NOT EXISTS cycle_history (
   correctness             REAL,
   escalation_correctness  REAL       -- NULL 가능(골드셋에 unanswerable 문항이 없으면)
 );
+
+-- KB(wiki_entry)가 아니라 그래프 화면(/static/graph.html) 표시용 파생 캐시 —
+-- 검색/평가는 절대 이 테이블을 안 본다(원본 topic/canonical/body_md는 그대로
+-- 영어로 남아 검색·평가에 쓰인다). entry_id+version으로 키를 잡아 콘텐츠가
+-- 실제로 바뀔 때만 무효화된다(core/graph.py의 임베딩 캐시와 동일 철학).
+-- 쓰기는 scripts/translate_wiki_labels.py(신뢰된 오프라인 스크립트)에서만.
+CREATE TABLE IF NOT EXISTS translation_cache (
+  entry_id   TEXT NOT NULL,
+  lang       TEXT NOT NULL DEFAULT 'ko',
+  version    INTEGER NOT NULL,
+  topic      TEXT,
+  canonical  TEXT,
+  body_md    TEXT,
+  updated_at REAL,
+  PRIMARY KEY (entry_id, lang)
+);
+
+-- core/retrieval.py·core/graph.py가 매 쿼리/그래프 빌드마다 처음부터 다시 인코딩
+-- 하던 dense 임베딩을 영속화한다(PersistentEmbeddingCache가 이 테이블을 읽고/쓴다).
+-- entry_id만 PK — model이 바뀌면(WIKI_AGENT_EMBED_MODEL) get_embedding이 model
+-- 불일치를 캐시미스로 취급하고 다음 set_embedding(INSERT OR REPLACE)이 새 모델
+-- 벡터로 자연스럽게 덮어쓴다. translation_cache와 동일 철학(entry_id+version 키).
+CREATE TABLE IF NOT EXISTS wiki_embedding (
+  entry_id   TEXT PRIMARY KEY,
+  model      TEXT NOT NULL,
+  version    INTEGER NOT NULL,
+  vector     BLOB NOT NULL,
+  updated_at REAL
+);
+
+-- wiki_entry는 status로(거의 모든 list_*), retrieval_log/feedback은 ts로(--window-days
+-- 윈도잉) 매번 필터링되는데 인덱스가 없으면 매번 풀스캔이다. 코퍼스/로그가 작을 때는
+-- 안 보이지만 커지면 가장 먼저 느려질 지점 — CREATE INDEX는 멱등적이라 매 init_db()
+-- 호출/기존 DB에도 안전하게 추가된다.
+CREATE INDEX IF NOT EXISTS idx_wiki_entry_status_updated_at ON wiki_entry(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_retrieval_log_ts ON retrieval_log(ts);
+CREATE INDEX IF NOT EXISTS idx_feedback_ts ON feedback(ts);
 """
 
 SEED_ENTRIES = [
@@ -130,7 +171,10 @@ SEED_ENTRIES = [
 
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    # timeout=5.0 -> SQLite의 busy_timeout(5000ms). 동시 쓰기가 겹치면 즉시
+    # "database is locked"로 죽는 대신 5초간 재시도한다(이 모듈은 매 호출마다
+    # 새 커넥션을 여는 구조라 매번 지정해야 함 — journal_mode와 달리 커넥션별 설정).
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -149,6 +193,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 def init_db(seed: bool = True) -> None:
     conn = _conn()
+    # WAL은 DB 파일에 영구 저장되는 설정이라 프로세스 시작 시 1회면 충분(매 _conn()
+    # 호출마다 안 해도 됨) — 쓰기 도중에도 읽기가 안 막히게 해서(쓰기끼리는 여전히
+    # 1개만, SQLite 근본 한계) 동시 접근 시 락 경합을 크게 줄인다.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     _migrate_schema(conn)
     if seed and conn.execute("SELECT COUNT(*) FROM wiki_entry").fetchone()[0] == 0:
@@ -215,6 +263,22 @@ def list_active_entries() -> List[Dict[str, Any]]:
         {**dict(r), "sources": json.loads(r["sources"]) if r["sources"] else []}
         for r in rows
     ]
+
+
+def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
+    """status 무관하게 entry_id 하나를 조회. core/pipeline/reindex.py가 막 쓰여진
+    엔트리(아직 status='shadow'일 수 있음)의 현재 version/텍스트를 읽어 임베딩을
+    영속화하는 데 쓴다 — list_active_entries 등은 특정 status로만 필터링해 이
+    용도에 안 맞는다."""
+    conn = _conn()
+    row = conn.execute(
+        """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
+                  version, sources, tier, status
+           FROM wiki_entry WHERE entry_id = ?""", (entry_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {**dict(row), "sources": json.loads(row["sources"]) if row["sources"] else []}
 
 
 def _bm25_rank(query: str, limit: int) -> List[str]:
@@ -292,6 +356,38 @@ def list_feedback(since_ts: float = None) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def purge_old_logs(retention_days: float = 30) -> Dict[str, int]:
+    """retrieval_log/feedback에서 retention_days보다 오래된 행을 지운다. --window-days
+    (mine_gaps가 보는 범위, 기본 14일)는 읽기 필터일 뿐 삭제하지 않으므로 두 테이블은
+    영원히 자란다 — 이 함수가 그 retention을 실제로 집행한다(scripts/purge_old_logs.py
+    가 호출하는 신뢰된 오프라인 작업, 자동 스케줄에는 기본으로 안 묶음).
+
+    conversation_log는 의도적으로 제외 — `/conversations` UI가 보여주는 사용자
+    대화 기록이라 마이닝 입력 로그(retrieval_log/feedback)와는 보존 정책이 달라야
+    한다고 판단."""
+    cutoff = time.time() - retention_days * 86400
+    conn = _conn()
+    retrieval_deleted = conn.execute(
+        "DELETE FROM retrieval_log WHERE ts < ?", (cutoff,)).rowcount
+    feedback_deleted = conn.execute(
+        "DELETE FROM feedback WHERE ts < ?", (cutoff,)).rowcount
+    conn.commit()
+    conn.close()
+    return {"retrieval_log_deleted": retrieval_deleted, "feedback_deleted": feedback_deleted}
+
+
+def backup_db(dest_path: str) -> None:
+    """SQLite Online Backup API(Connection.backup)로 현재 DB를 dest_path에 통째로
+    복제한다. 단순 파일 복사(cp)는 WAL 모드에서 최근 커밋이 아직 -wal 파일에만 있을
+    수 있어 일관성이 깨질 위험이 있는데, backup()은 그런 경우에도 일관된 스냅샷을
+    보장한다. scripts/backup_db.py(신뢰된 오프라인 스크립트)에서만 호출."""
+    conn = _conn()
+    dest = sqlite3.connect(dest_path)
+    conn.backup(dest)
+    dest.close()
+    conn.close()
+
+
 def list_shadow_entries() -> List[Dict[str, Any]]:
     """status='shadow' 엔트리 전체를 반환 (promote 단계의 승격/병합 입력)."""
     conn = _conn()
@@ -360,6 +456,112 @@ def set_entry_status(entry_id: str, status: str) -> None:
     conn.execute("UPDATE wiki_entry SET status = ? WHERE entry_id = ?", (status, entry_id))
     conn.commit()
     conn.close()
+
+
+def get_translations(entry_ids: List[str], lang: str = "ko") -> Dict[str, Dict[str, Any]]:
+    """그래프 화면 표시용 번역 캐시 조회. {entry_id: {version, topic, canonical,
+    body_md}} 반환 — 호출부(core/graph.py)가 version을 노드의 현재 version과
+    비교해 콘텐츠가 그새 바뀌었으면 무시하고 영어로 폴백한다."""
+    if not entry_ids:
+        return {}
+    conn = _conn()
+    placeholders = ",".join("?" * len(entry_ids))
+    rows = conn.execute(
+        f"""SELECT entry_id, version, topic, canonical, body_md
+            FROM translation_cache WHERE lang = ? AND entry_id IN ({placeholders})""",
+        (lang, *entry_ids)).fetchall()
+    conn.close()
+    return {r["entry_id"]: dict(r) for r in rows}
+
+
+def set_translation(entry_id, version, topic, canonical, body_md, *,
+                     lang="ko", conn=None) -> None:
+    """번역 캐시 upsert(entry_id+lang 키). scripts/translate_wiki_labels.py
+    (신뢰된 오프라인 스크립트)에서만 호출 — 데모 서빙 경로는 절대 안 씀."""
+    own = conn is None
+    conn = conn or _conn()
+    conn.execute(
+        """INSERT INTO translation_cache
+           (entry_id, lang, version, topic, canonical, body_md, updated_at)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(entry_id, lang) DO UPDATE SET
+             version=excluded.version, topic=excluded.topic,
+             canonical=excluded.canonical, body_md=excluded.body_md,
+             updated_at=excluded.updated_at""",
+        (entry_id, lang, version, topic, canonical, body_md, time.time()))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+def get_embedding(entry_id: str, *, model: str = None) -> Optional[Tuple[int, np.ndarray]]:
+    """영속화된 (version, vector)를 반환. model이 현재 설정(retrieval.EMBED_MODEL)과
+    다른 행은 None(미스로 취급) — 임베딩 모델이 바뀌면 옛 모델 벡터를 쓰면 안 되므로,
+    그냥 없던 것처럼 동작해 호출부(PersistentEmbeddingCache)가 재인코딩하게 한다."""
+    model = model or retrieval.EMBED_MODEL
+    conn = _conn()
+    row = conn.execute(
+        "SELECT model, version, vector FROM wiki_embedding WHERE entry_id = ?",
+        (entry_id,)).fetchone()
+    conn.close()
+    if row is None or row["model"] != model:
+        return None
+    vector = np.frombuffer(row["vector"], dtype=np.float32).copy()
+    return row["version"], vector
+
+
+def set_embedding(entry_id: str, version: int, vector: np.ndarray, *,
+                   model: str = None, conn=None) -> None:
+    """임베딩 캐시 upsert(entry_id 키). vector는 float32 bytes로 직렬화해 저장."""
+    model = model or retrieval.EMBED_MODEL
+    own = conn is None
+    conn = conn or _conn()
+    blob = np.asarray(vector, dtype=np.float32).tobytes()
+    conn.execute(
+        """INSERT INTO wiki_embedding (entry_id, model, version, vector, updated_at)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(entry_id) DO UPDATE SET
+             model=excluded.model, version=excluded.version,
+             vector=excluded.vector, updated_at=excluded.updated_at""",
+        (entry_id, model, version, blob, time.time()))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+class PersistentEmbeddingCache:
+    """core/lru_cache.LRUCache와 동일한 get()/__setitem__ 계약을 만족하는 드롭인
+    대체물 — core/retrieval.py·core/graph.py는 무수정으로 그대로 받아 쓸 수 있다.
+
+    메모리(LRUCache)에서 미스가 나면 DB(wiki_embedding)를 먼저 보고, 거기도 없을
+    때만 호출부가 embed_fn으로 재인코딩한다. 프로세스가 재시작되거나(데모/MCP
+    재기동) 서로 다른 프로세스(데모 서빙 vs MCP 서버)가 같은 DB를 봐도 한 번
+    인코딩된 엔트리는 재인코딩하지 않는다."""
+
+    def __init__(self, maxsize: int = 2000, model: str = None):
+        self._mem = LRUCache(maxsize=maxsize)
+        self.model = model or retrieval.EMBED_MODEL
+
+    def get(self, key, default=None):
+        hit = self._mem.get(key)
+        if hit is not None:
+            return hit
+        row = get_embedding(key, model=self.model)
+        if row is None:
+            return default
+        self._mem[key] = row
+        return row
+
+    def __setitem__(self, key, value):
+        self._mem[key] = value
+        version, vector = value
+        set_embedding(key, version, vector, model=self.model)
+
+    def __len__(self):
+        return len(self._mem)
+
+    def __contains__(self, key):
+        return key in self._mem
 
 
 def log_turn(conv_id, turn_id, query, answer, retrieved_ids, escalated=False):
