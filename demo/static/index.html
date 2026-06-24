@@ -350,8 +350,10 @@
         // 그래프 뷰가 ?focus=entry_id를 받으면 해당 노드를 선택/포커스하므로
         // entry_id 텍스트가 실질적인 "출처 링크" 역할을 한다(전용 상세 페이지는
         // 없음 — README 참고).
+        // 같은 탭에서 이동한다(새 탭 아님) — 대화는 서버(conversation_log)에
+        // 그대로 남아 있어서, 그래프 쪽 "💬 채팅으로 돌아가기"로 돌아오면
+        // loadConversation()이 이 대화를 그대로 복원한다(데이터 손실 없음).
         a.href = `/static/graph.html?focus=${encodeURIComponent(h.entry_id)}`;
-        a.target = "_blank";
         a.textContent = h.entry_id;
         src.appendChild(a);
       });

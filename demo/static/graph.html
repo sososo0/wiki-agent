@@ -9,6 +9,18 @@
   header { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 16px; }
   header h2 { margin: 0; font-size: 18px; }
   header a { color: #2563eb; text-decoration: none; }
+  /* 채팅의 "근거" 링크(?focus=entry_id)로 들어왔을 때만 보이는, 더 눈에 띄는
+     복귀 안내 — 헤더의 작은 "← 채팅으로" 링크보다 맥락이 분명하다. */
+  #focus-banner {
+    display: none; background: #eff6ff; border-bottom: 1px solid #bfdbfe;
+    padding: 10px 16px; font-size: 13px; color: #1e40af;
+    align-items: center; gap: 8px;
+  }
+  #focus-banner a {
+    color: #fff; background: #2563eb; text-decoration: none; font-weight: 600;
+    padding: 4px 10px; border-radius: 6px; font-size: 12px;
+  }
+  #focus-banner a:hover { background: #1d4ed8; }
   #graph-toolbar {
     position: absolute; top: 10px; right: 10px; z-index: 10;
     display: flex; gap: 8px;
@@ -34,7 +46,9 @@
   #wrap { display: flex; flex: 1; min-height: 0; }
   body { display: flex; flex-direction: column; height: 100vh; }
   #network-wrap { position: relative; flex: 1; }
-  #network { position: absolute; inset: 0; }
+  /* 순백색 배경 위에서는 옅은 색(연관 엣지·shadow/deprecated 노드)과 라벨
+     텍스트가 묻혀 잘 안 보인다 — 살짝 톤을 낮춰 대비를 준다. */
+  #network { position: absolute; inset: 0; background: #f8fafc; }
   #panel { width: 320px; border-left: 1px solid #e2e8f0; padding: 16px; overflow-y: auto; font-size: 14px; }
   #panel h3 { margin-top: 0; }
   #panel .field { margin-bottom: 10px; }
@@ -64,6 +78,10 @@
   <a href="/">← 채팅으로</a>
   <a href="/static/history.html">📈 사이클 추이</a>
 </header>
+<div id="focus-banner">
+  <span>채팅 답변의 근거를 보여주는 중입니다.</span>
+  <a href="/">💬 채팅으로 돌아가기</a>
+</div>
 <div id="info">
   <p>
     위키의 현재 상태를 그래프로 보여줍니다. 비슷한 항목들은 <b>큰 대표(backbone) 노드</b>로
@@ -82,7 +100,7 @@
       <h4>엣지 종류 (항목 간 관계)</h4>
       <div><span class="line" style="border-color:#f59e0b"></span>pending_update — shadow 항목이 대체하려는 active 항목을 가리킴(승격 대기)</div>
       <div><span class="line" style="border-color:#94a3b8"></span>superseded_by — deprecated 항목이 과거에 대체했던 대상을 가리킴(교체 이력)</div>
-      <div><span class="line" style="border-color:#cbd5e1"></span>similar — 두 항목의 내용이 임베딩 기준 서로 비슷함(방향 없음, 선이 두꺼울수록 더 비슷함)</div>
+      <div><span class="line" style="border-color:#cbd5e1"></span>similar — 두 항목의 내용이 임베딩 기준 서로 비슷함(방향 없음, 선이 두껍고 진할수록 더 비슷함)</div>
       <div><span class="line" style="border-color:#1e3a8a"></span>cluster_similar — 큰 주제(backbone) 노드끼리도 서로 얼마나 비슷한지 나타냄</div>
     </div>
   </div>
@@ -173,7 +191,9 @@
             shape: "dot",
             size: 14 + Math.min(24, c.size),
             color: { background: "#1e3a8a", border: "#1e3a8a" },
-            font: { color: "#ffffff" },
+            // 이전엔 흰 글씨였는데, vis-network가 라벨을 노드 안이 아니라 노드
+            // 아래(배경=흰색 캔버스)에 그려서 흰 글씨가 그대로 안 보이는 버그가
+            // 있었다 — 전역 기본 폰트(아래 new vis.Network options)와 통일.
           },
         });
       } catch (err) {
@@ -187,12 +207,20 @@
   function toVisEdge(e, idx) {
     const style = EDGE_STYLE[e.type] || EDGE_STYLE.similar;
     const isSimilarLike = e.type === "similar" || e.type === "cluster_similar";
+    // weight(코사인 유사도, similarity_threshold~1.0)를 두께 하나로만 표현하면
+    // 실측 분포가 보통 threshold 근처(0.3~0.6)에 몰려 있어 두께 차이가
+    // Math.max(1, weight*4)로는 1.2~2.4px 정도라 사람 눈에 잘 안 들어온다.
+    // 두께를 더 가파르게 키우고, 진하기(불투명도)도 같이 바꿔 두 채널로
+    // 표현하면 약한/강한 관계가 훨씨 뚜렷이 구별된다.
+    const width = isSimilarLike ? 1 + e.weight * 7 : 2;
+    const opacity = isSimilarLike ? Math.max(0.25, Math.min(1, e.weight)) : 1;
     return {
       id: idx,
       from: e.source,
       to: e.target,
-      width: isSimilarLike ? Math.max(1, e.weight * 4) : 2,
       ...style,
+      width,
+      color: isSimilarLike ? { color: style.color, opacity } : style.color,
     };
   }
 
@@ -353,6 +381,13 @@
         },
         interaction: { hover: true },
         edges: { smooth: false },
+        // 라벨은 진한 텍스트 + 흰 테두리(halo)로 통일 — vis-network가 라벨을
+        // 노드 위가 아니라 옆/아래의 옅은 캔버스 배경에 그릴 때도(클러스터
+        // 대표 노드처럼 진한 배경을 기대하고 흰 글씨를 쓰면 거기선 안 보임),
+        // 테두리가 있으면 밝든 어둡든 배경과 상관없이 읽힌다.
+        nodes: {
+          font: { color: "#1e293b", strokeWidth: 3, strokeColor: "#f8fafc" },
+        },
       }
     );
 
@@ -381,6 +416,7 @@
     const focusId = new URLSearchParams(location.search).get("focus");
     if (focusId) {
       setTimeout(() => focusNode(focusId), 300);
+      document.getElementById("focus-banner").style.display = "flex";
     }
   }
 

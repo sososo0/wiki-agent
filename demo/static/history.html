@@ -20,10 +20,30 @@
   .legend .swatch { width: 14px; height: 3px; display: inline-block; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 20px; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f1f5f9; }
-  th { color: #64748b; font-size: 11px; text-transform: uppercase; }
+  th { color: #64748b; font-size: 11px; text-transform: uppercase; cursor: help; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .promoted-yes { color: #16a34a; }
   .promoted-no { color: #94a3b8; }
+  #toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+  #toolbar button { border: 1px solid #e2e8f0; background: #fff; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: #374151; }
+  #toolbar button:hover { background: #f1f5f9; }
+  #page-size-wrap { font-size: 12px; color: #64748b; display: flex; align-items: center; gap: 6px; }
+  #page-size-wrap select { font-size: 12px; padding: 2px 4px; }
+  #column-legend { display: none; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 12px; color: #374151; line-height: 1.6; }
+  #column-legend dt { font-weight: 600; color: #1f2937; }
+  #column-legend dd { margin: 0 0 6px 0; color: #64748b; }
+  tr.filter-row input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  tr.filter-row th { padding: 4px 10px; }
+  /* 승격 컬럼처럼 값이 명확히 정해진 컬럼은 자유 입력 대신 토글 버튼으로 — 오타
+     걱정 없이 클릭만으로 정확히 필터링된다. */
+  .toggle-group { display: flex; border: 1px solid #e2e8f0; border-radius: 4px; overflow: hidden; }
+  .toggle-group button {
+    flex: 1; border: none; background: #fff; padding: 3px 4px; font-size: 11px;
+    cursor: pointer; color: #374151; border-right: 1px solid #e2e8f0;
+  }
+  .toggle-group button:last-child { border-right: none; }
+  .toggle-group button:hover { background: #f1f5f9; }
+  .toggle-group button.active { background: #2563eb; color: #fff; }
 </style>
 </head>
 <body>
@@ -40,6 +60,17 @@
     스스로 갱신한다"는 이 프로젝트의 핵심 서사가 실제로 검색 품질을 개선(혹은
     적어도 퇴화시키지 않음)하는지를 여러 사이클에 걸쳐 눈으로 확인할 수 있습니다.
   </p>
+  <button id="legend-toggle" type="button" style="margin-top:8px; border:1px solid #e2e8f0; background:#fff; border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; color:#374151;">ℹ️ 컬럼 설명 보기</button>
+  <dl id="column-legend">
+    <dt>시각</dt><dd>그 사이클이 실행된 시각.</dd>
+    <dt>gap</dt><dd>그 사이클에서 마이닝된(발견된) gap 개수 — 위키가 답을 잘 못 찾는다고 판단된, 반복된 저신뢰 질문 그룹의 수.</dd>
+    <dt>shadow</dt><dd>그 사이클에서 새로 shadow로 반영된(아직 승격되지 않은) 후보 엔트리 수.</dd>
+    <dt>승격</dt><dd>그 사이클 결과로 shadow 후보가 실제로 active로 승격됐는지 — 골드셋 회귀(recall@k/correctness 하락 등)가 감지되면 승격되지 않고 shadow로 남습니다.</dd>
+    <dt>recall@k</dt><dd>그 시점의 active 위키로 골드셋 질문들을 검색했을 때, 정답 엔트리가 top-k 결과 안에 포함된 비율(0~1, 높을수록 좋음).</dd>
+    <dt>mrr</dt><dd>Mean Reciprocal Rank — 정답이 검색 결과에서 몇 번째 순위로 나왔는지의 평균 역수(1위에 가까울수록 1에 가까움).</dd>
+    <dt>correctness</dt><dd>LLM judge가 채점한 답변의 사실적 정확도(0~1, 골드셋의 기준 답변과 비교).</dd>
+    <dt>escalation</dt><dd>KB가 답을 모르는(unanswerable) 골드셋 질문에 대해 "모른다"고 올바르게 인정한 비율 — 골드셋에 unanswerable 문항이 없으면 "—"로 표시.</dd>
+  </dl>
 </div>
 <div id="content">
   <div id="chart-wrap">
@@ -50,16 +81,52 @@
     </div>
     <canvas id="chart" width="860" height="220"></canvas>
   </div>
+  <div id="toolbar">
+    <span id="row-count-hint" style="font-size:12px; color:#94a3b8;"></span>
+    <span id="page-size-wrap">
+      표시 개수:
+      <select id="page-size">
+        <option value="10">10개</option>
+        <option value="25" selected>25개</option>
+        <option value="50">50개</option>
+        <option value="100">100개</option>
+        <option value="all">전체</option>
+      </select>
+    </span>
+  </div>
   <table id="table">
     <thead>
       <tr>
-        <th>시각</th><th>gap</th><th>shadow</th><th>승격</th>
-        <th>recall@k</th><th>mrr</th><th>correctness</th><th>escalation</th>
+        <th title="그 사이클이 실행된 시각">시각</th>
+        <th title="그 사이클에서 마이닝된(발견된) gap 개수">gap</th>
+        <th title="그 사이클에서 새로 shadow로 반영된 후보 엔트리 수">shadow</th>
+        <th title="shadow 후보가 실제로 active로 승격됐는지(골드셋 회귀 시 승격 안 됨)">승격</th>
+        <th title="골드셋 질문 중 정답 엔트리가 top-k 검색 결과에 포함된 비율">recall@k</th>
+        <th title="정답이 검색 결과에서 몇 번째 순위로 나왔는지의 평균 역수(Mean Reciprocal Rank)">mrr</th>
+        <th title="LLM judge가 채점한 답변의 사실적 정확도">correctness</th>
+        <th title="KB가 답을 모르는 질문에 올바르게 모른다고 인정한 비율">escalation</th>
+      </tr>
+      <tr class="filter-row">
+        <th><input type="text" data-col="ts" placeholder="예: 06/24"></th>
+        <th><input type="text" data-col="mined" placeholder="검색..."></th>
+        <th><input type="text" data-col="shadow_count" placeholder="검색..."></th>
+        <th>
+          <div class="toggle-group" data-col="promoted">
+            <button type="button" data-value="" class="active">전체</button>
+            <button type="button" data-value="승격됨">승격됨</button>
+            <button type="button" data-value="미승격">미승격</button>
+          </div>
+        </th>
+        <th><input type="text" data-col="recall_at_k" placeholder="검색..."></th>
+        <th><input type="text" data-col="mrr" placeholder="검색..."></th>
+        <th><input type="text" data-col="correctness" placeholder="검색..."></th>
+        <th><input type="text" data-col="escalation_correctness" placeholder="검색..."></th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
   <p id="empty-hint" style="display:none">아직 기록된 사이클이 없습니다. 갱신 사이클을 1회 이상 실행하면 여기 쌓입니다.</p>
+  <p id="no-match-hint" style="display:none; color:#94a3b8;">필터에 맞는 사이클이 없습니다.</p>
 </div>
 
 <script>
@@ -116,39 +183,114 @@
     line("mrr", "#f59e0b");
   }
 
-  function renderTable(cycles) {
+  // 필터(검색)와 렌더링이 같은 표시 문자열을 보도록 한 곳에서 포맷한다 —
+  // 안 그러면 "화면엔 0.987인데 필터는 0.98712...로 비교" 같은 불일치가 생긴다.
+  function formatRow(c) {
+    return {
+      ts: fmtTime(c.ts),
+      mined: String(c.mined),
+      shadow_count: String(c.shadow_count),
+      promoted: c.promoted ? "승격됨" : "미승격",
+      recall_at_k: (c.recall_at_k ?? 0).toFixed(3),
+      mrr: (c.mrr ?? 0).toFixed(3),
+      correctness: (c.correctness ?? 0).toFixed(3),
+      escalation_correctness: c.escalation_correctness == null ? "—" : c.escalation_correctness.toFixed(3),
+    };
+  }
+
+  function renderTable(rows) {
     const tbody = document.querySelector("#table tbody");
     tbody.innerHTML = "";
-    for (const c of cycles) {
+    for (const r of rows) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${fmtTime(c.ts)}</td>
-        <td class="num">${c.mined}</td>
-        <td class="num">${c.shadow_count}</td>
-        <td class="${c.promoted ? "promoted-yes" : "promoted-no"}">${c.promoted ? "✅" : "—"}</td>
-        <td class="num">${(c.recall_at_k ?? 0).toFixed(3)}</td>
-        <td class="num">${(c.mrr ?? 0).toFixed(3)}</td>
-        <td class="num">${(c.correctness ?? 0).toFixed(3)}</td>
-        <td class="num">${c.escalation_correctness == null ? "—" : c.escalation_correctness.toFixed(3)}</td>
-      `;
+      const tds = [
+        [r.ts, false], [r.mined, true], [r.shadow_count, true],
+        [r.promoted, false], [r.recall_at_k, true], [r.mrr, true],
+        [r.correctness, true], [r.escalation_correctness, true],
+      ];
+      for (const [text, isNum] of tds) {
+        const td = document.createElement("td");
+        if (isNum) td.className = "num";
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      tr.children[3].className = r.promoted === "승격됨" ? "promoted-yes" : "promoted-no";
       tbody.appendChild(tr);
     }
   }
 
+  let allCycles = [];   // /cycle-history 원본(ts ASC)
+  let allFormatted = []; // formatRow() 적용 결과, allCycles와 같은 인덱스
+
+  function applyFiltersAndRender() {
+    const filters = {};
+    document.querySelectorAll(".filter-row input[data-col]").forEach((input) => {
+      const v = input.value.trim().toLowerCase();
+      if (v) filters[input.dataset.col] = v;
+    });
+    document.querySelectorAll(".toggle-group").forEach((group) => {
+      const activeBtn = group.querySelector("button.active");
+      const v = (activeBtn ? activeBtn.dataset.value : "").trim().toLowerCase();
+      if (v) filters[group.dataset.col] = v;
+    });
+
+    const matchedIdx = allFormatted
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => Object.entries(filters).every(([col, v]) => r[col].toLowerCase().includes(v)))
+      .map(({ i }) => i);
+
+    const pageSizeRaw = document.getElementById("page-size").value;
+    const pageSize = pageSizeRaw === "all" ? matchedIdx.length : parseInt(pageSizeRaw, 10);
+    const shownIdx = matchedIdx.slice(Math.max(0, matchedIdx.length - pageSize));
+
+    const shownCycles = shownIdx.map((i) => allCycles[i]);
+    const shownRows = shownIdx.map((i) => allFormatted[i]);
+
+    document.getElementById("row-count-hint").textContent =
+      `전체 ${allCycles.length}개 중 ${matchedIdx.length}개 일치, ${shownCycles.length}개 표시`;
+    // 0개 일치해도 thead(필터 입력창)는 항상 보여야 필터를 다시 풀 수 있다 —
+    // 표 전체를 숨기면 입력창도 같이 사라져서 필터 해제가 불가능해진다.
+    document.getElementById("no-match-hint").style.display = matchedIdx.length ? "none" : "";
+
+    drawChart(document.getElementById("chart"), shownCycles);
+    renderTable(shownRows);
+  }
+
+  document.querySelectorAll(".filter-row input[data-col]").forEach((input) => {
+    input.addEventListener("input", applyFiltersAndRender);
+  });
+  document.querySelectorAll(".toggle-group button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      btn.parentElement.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      applyFiltersAndRender();
+    });
+  });
+  document.getElementById("page-size").addEventListener("change", applyFiltersAndRender);
+
+  const legendToggle = document.getElementById("legend-toggle");
+  const legend = document.getElementById("column-legend");
+  legendToggle.addEventListener("click", () => {
+    const hidden = legend.style.display === "none" || !legend.style.display;
+    legend.style.display = hidden ? "block" : "none";
+    legendToggle.textContent = hidden ? "ℹ️ 컬럼 설명 숨기기" : "ℹ️ 컬럼 설명 보기";
+  });
+
   async function main() {
     const resp = await fetch("/cycle-history");
     const data = await resp.json();
-    const cycles = data.cycles || [];
+    allCycles = data.cycles || [];
+    allFormatted = allCycles.map(formatRow);
 
-    if (!cycles.length) {
+    if (!allCycles.length) {
       document.getElementById("chart-wrap").style.display = "none";
       document.getElementById("table").style.display = "none";
+      document.getElementById("toolbar").style.display = "none";
       document.getElementById("empty-hint").style.display = "";
       return;
     }
 
-    drawChart(document.getElementById("chart"), cycles);
-    renderTable(cycles);
+    applyFiltersAndRender();
   }
 
   main();
