@@ -147,7 +147,7 @@ EOF
 chmod +x ~/.hermes/scripts/wiki_agent_update_cycle.sh
 
 # 2) cron 등록 (--no-agent: 스크립트 자체가 job, 에이전트 루프 미사용)
-hermes cron create "0 2 * * *" --name wiki-agent-update-cycle \
+hermes cron create "0 */6 * * *" --name wiki-agent-update-cycle \
   --script wiki_agent_update_cycle.sh --no-agent
 
 # 3) 실제로 실행되려면 게이트웨이(스케줄러 데몬)가 떠 있어야 한다 — 등록만으로는 안 돈다
