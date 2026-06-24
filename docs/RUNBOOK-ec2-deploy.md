@@ -63,13 +63,49 @@ docker run -d --name wiki-agent --restart unless-stopped \
 - `--restart unless-stopped` + `systemctl enable docker`(Step 1에서 이미 실행):
   인스턴스가 재부팅돼도 Docker 데몬과 컨테이너가 자동으로 다시 뜬다.
 
-## Step 5 — 보안 그룹 확인 (AWS 콘솔에서)
+## Step 5 — 위키 콘텐츠 시딩 (최초 1회)
+
+빌드(의존성 설치)와 서빙(컨테이너 기동)에는 DB도 `ANTHROPIC_API_KEY`도 끼어들 틈이
+없다 — DB는 런타임 볼륨(`/data`)이라 빌드 시점엔 존재하지 않고, 키는 이미지에
+구워넣지 않고 `--env-file .env`로 런타임에만 주입되기 때문이다. 그래서 컨테이너가
+떠 있다고 위키 콘텐츠가 자동으로 채워지지 않는다 — `data/corpus/`의 문서를 위키로
+변환하는 ingestion은 사람이 한 번 명시적으로 실행하는 별도 단계다.
+
+`scripts/ingest_doc.py`는 청크마다 LLM(curate)을 호출하므로 시간이 걸리고
+(`data/corpus/` 전체면 청크 수백 개 단위) 비용도 든다. SSH 세션이 끊겨도 끝까지
+돌도록 백그라운드로 실행한다. 기본 `--daily-cap`은 20이라 대량 초기 시딩에는
+부족하므로 올려준다.
+
+```bash
+cd ~/wiki-agent
+nohup docker exec -w /app wiki-agent python scripts/ingest_doc.py data/corpus --daily-cap 500 > ~/ingest_corpus.log 2>&1 &
+disown
+```
+
+진행 상황 확인:
+
+```bash
+tail -f ~/ingest_corpus.log
+```
+
+먼저 `--dry-run`(LLM 호출/DB 쓰기 없음, 무료)으로 create/update/skip 분류만
+미리 보고 싶다면:
+
+```bash
+docker exec -w /app wiki-agent python scripts/ingest_doc.py data/corpus --dry-run
+```
+
+> 멱등적이다(`core/pipeline/dedupe.py`가 `chunk_hash`로 변경 없는 청크를 skip) —
+> DB는 영속 볼륨에 남으므로, "코드 갱신 시(재배포)" 절차로 컨테이너를 새로 띄워도
+> 이 단계를 다시 실행할 필요는 없다(문서 자체가 바뀌었을 때만 다시 돌리면 됨).
+
+## Step 6 — 보안 그룹 확인 (AWS 콘솔에서)
 
 이 인스턴스의 보안 그룹 인바운드 규칙에 **TCP 8000**이 열려 있는지 확인할 것
 (0.0.0.0/0으로 전체 공개하거나, 필요하면 특정 IP만). 22(SSH)는 이미 접속에
 썼으니 열려 있을 것이다.
 
-## Step 6 — 동작 확인
+## Step 7 — 동작 확인
 
 ```bash
 curl http://localhost:8000/                 # 인스턴스 안에서
@@ -77,7 +113,7 @@ curl http://localhost:8000/                 # 인스턴스 안에서
 docker logs -f wiki-agent                    # 문제 생기면 로그 확인
 ```
 
-## Step 7 — 갱신 사이클 cron 등록 (launchd 대체)
+## Step 8 — 갱신 사이클 cron 등록 (launchd 대체)
 
 `docker exec`은 `docker run` 때 준 환경변수(`WIKI_AGENT_DB`, `ANTHROPIC_API_KEY`)를
 그대로 물려받으므로 따로 다시 안 줘도 된다. crontab 한 줄에 타임스탬프 로그 파일명을
@@ -110,7 +146,7 @@ crontab에 한 줄 추가(6시간마다 — 00:00/06:00/12:00/18:00):
 > 없다 — 평범한 Linux cron이라 사이클이 오래 걸려도(LLM 호출 포함) 안전하게
 > 끝까지 돈다.
 
-## Step 8 — (선택) 로그 retention / DB 백업도 같은 패턴으로
+## Step 9 — (선택) 로그 retention / DB 백업도 같은 패턴으로
 
 데이터 삭제는 되돌릴 수 없어 cron에 조용히 끼워넣지 않는 게 원칙이지만(README/
 demo-operations.md 참고), 원하면 같은 방식으로 별도 cron 줄을 추가:
