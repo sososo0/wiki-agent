@@ -268,11 +268,29 @@
   let convId = localStorage.getItem(LS_CONV_ID);
   let turnId = 0;
 
+  // crypto.randomUUID()는 보안 컨텍스트(HTTPS/localhost)에서만 존재 — 평문 HTTP로
+  // 배포된 EC2 데모 등에서는 undefined라 직접 호출하면 TypeError로 죽는다.
+  function genUUID() {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+      crypto.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0"));
+    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+  }
+
   // 브라우저당 한 번만 발급 — "새 대화"를 눌러도(convId는 바뀜) 안 바뀐다.
   // /conversations·/history가 이 토큰으로 "내 대화"만 보여주는 데 쓰인다.
   let ownerToken = localStorage.getItem(LS_OWNER_TOKEN);
   if (!ownerToken) {
-    ownerToken = crypto.randomUUID();
+    ownerToken = genUUID();
     localStorage.setItem(LS_OWNER_TOKEN, ownerToken);
   }
 
@@ -439,7 +457,7 @@
   }
 
   function startNewConversation() {
-    convId = crypto.randomUUID();
+    convId = genUUID();
     localStorage.setItem(LS_CONV_ID, convId);
     turnId = 0;
     log.innerHTML = "";
@@ -697,7 +715,7 @@
   });
 
   if (!convId) {
-    convId = crypto.randomUUID();
+    convId = genUUID();
     localStorage.setItem(LS_CONV_ID, convId);
   } else {
     loadConversation(convId);
