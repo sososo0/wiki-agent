@@ -134,22 +134,26 @@
     #drawer-backdrop {
       position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 25;
     }
-    body.list-open #drawer-backdrop, body.panel-open #drawer-backdrop { display: block; }
-    body.panel-open #panel-close-btn { display: block; }
+    body.drawer-open #drawer-backdrop { display: block; }
+    body.drawer-open #panel-close-btn { display: block; }
 
+    /* 좁은 화면은 좌우로 목록+상세를 나눌 공간이 없으므로, 둘을 한 영역으로
+       합쳐 위(목록 검색)/아래(상세 설명) 반씩 쓰는 드로어 하나로 보여준다 —
+       열고 닫는 상태(drawer-open)도 하나로 공유. */
+    #entry-list-wrap, #panel {
+      position: fixed; left: 0; right: 0; z-index: 30; height: 50%;
+      width: auto; max-width: none; transition: transform 0.2s ease; background: #fff;
+    }
     #entry-list-wrap {
-      position: fixed; inset: 0 auto 0 0; z-index: 30; width: 85%; max-width: 320px;
-      transform: translateX(-100%); transition: transform 0.2s ease;
-      background: #fff; box-shadow: 2px 0 12px rgba(0,0,0,0.15);
+      top: 0; transform: translateY(-100%);
+      border-right: none; border-bottom: 1px solid #e2e8f0;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.15);
     }
-    body.list-open #entry-list-wrap { transform: translateX(0); }
-
     #panel {
-      position: fixed; inset: 0 0 0 auto; z-index: 30; width: 85%; max-width: 360px;
-      transform: translateX(100%); transition: transform 0.2s ease;
-      background: #fff; border-left: none; box-shadow: -2px 0 12px rgba(0,0,0,0.15);
+      top: 50%; transform: translateY(100%);
+      border-left: none; box-shadow: 0 -2px 12px rgba(0,0,0,0.15);
     }
-    body.panel-open #panel { transform: translateX(0); }
+    body.drawer-open #entry-list-wrap, body.drawer-open #panel { transform: translateY(0); }
   }
 </style>
 </head>
@@ -237,10 +241,10 @@
 
   const NARROW_MEDIA = window.matchMedia("(max-width: 860px)");
 
-  // 좁은 화면에서는 #panel이 항상-보이는 컬럼이 아니라 오버레이 드로어라,
-  // 내용을 채울 때마다 열어줘야 한다(닫기는 panel-close-btn/백드롭/뒤로가기).
+  // 좁은 화면에서는 목록+상세가 위/아래로 합쳐진 드로어 하나라, 내용을 채울
+  // 때마다 열어줘야 한다(닫기는 panel-close-btn/백드롭으로).
   function openPanelDrawer() {
-    if (NARROW_MEDIA.matches) document.body.classList.add("panel-open");
+    if (NARROW_MEDIA.matches) document.body.classList.add("drawer-open");
   }
 
   // #info 범례에 이미 있는 문구를 그대로 옮긴 것 — 엣지 상세 패널에서도 같은
@@ -444,18 +448,18 @@
     infoToggle.textContent = "ℹ️ 설명 보기";
   }
 
-  // 좁은 화면용 목록/상세 드로어 — 토글 버튼, 닫기 버튼, 백드롭 클릭으로 닫기.
+  // 좁은 화면용 목록+상세 통합 드로어 — 토글 버튼, 닫기 버튼, 백드롭 클릭으로 닫기.
   const entryListToggle = document.getElementById("entry-list-toggle");
   const panelCloseBtn = document.getElementById("panel-close-btn");
   const drawerBackdrop = document.getElementById("drawer-backdrop");
   entryListToggle.addEventListener("click", () => {
-    document.body.classList.toggle("list-open");
+    document.body.classList.toggle("drawer-open");
   });
   panelCloseBtn.addEventListener("click", () => {
-    document.body.classList.remove("panel-open");
+    document.body.classList.remove("drawer-open");
   });
   drawerBackdrop.addEventListener("click", () => {
-    document.body.classList.remove("list-open", "panel-open");
+    document.body.classList.remove("drawer-open");
   });
 
   function buildEntryList(nodes, onSelect) {
@@ -528,7 +532,9 @@
   }
 
   function focusNode(id) {
-    document.body.classList.remove("list-open");
+    // 목록에서 항목을 골라도 드로어를 닫지 않는다 — 좁은 화면에서는 목록(위
+    // 절반)과 상세(아래 절반)가 같은 드로어를 공유하므로 그대로 둬야 결과를
+    // 같은 화면에서 볼 수 있다(renderDetail의 openPanelDrawer가 필요하면 연다).
     const n = data.nodes.find((x) => x.id === id);
     if (!n) return;
     const targetView = n.cluster_size > 1 ? "detail:" + n.cluster_id : "overview";
