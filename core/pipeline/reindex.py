@@ -1,17 +1,14 @@
 """
 wiki-agent / core / pipeline / reindex.py
 
-core/wiki_store.PersistentEmbeddingCache가 영속 임베딩 테이블(wiki_embedding)을
-도입한 뒤로, 갱신 사이클(scripts/run_update_cycle.py)이 막 쓴 entry_id의 임베딩을
-미리 계산해 그 테이블에 적재한다. 안 하면 다음에 그 entry_id를 보는 첫 검색/그래프
-요청이 인코딩 비용을 그대로 물게 된다(여전히 정답은 맞다 — PersistentEmbeddingCache의
-lazy 폴백이 그 자리에서 인코딩해 채워주므로) — 이 함수는 그 비용을 사용자 요청
-경로에서 오프라인 파이프라인 쪽으로 옮기는 최적화일 뿐, 정확성을 위한 필수 경로는
-아니다.
+갱신 사이클(scripts/run_update_cycle.py)이 막 쓴 entry_id의 임베딩을 미리 계산해
+영속 임베딩 테이블(wiki_embedding)에 적재한다. 안 해도 정답은 맞다 —
+PersistentEmbeddingCache의 lazy 폴백이 그 자리에서 인코딩해 채워주므로, 이 함수는
+인코딩 비용을 사용자 요청 경로에서 오프라인 파이프라인 쪽으로 옮기는 최적화일 뿐
+정확성에 필수는 아니다.
 
-그래서 임베딩 계산이 실패해도(예: 모델 로딩/네트워크 문제) 사이클 전체를 막지
-않는다 — lazy 폴백이 항상 안전망이기 때문(core/pipeline/parse.py의 "파싱 단계는
-절대 전체를 막으면 안 됨"과 같은 이유).
+그래서 임베딩 계산이 실패해도 사이클 전체를 막지 않는다 — lazy 폴백이 안전망이기
+때문.
 """
 
 from typing import Callable, List, Optional
@@ -34,6 +31,5 @@ def reindex_changed(changed_entry_ids: List[str], *, embed_fn: Optional[Callable
         vectors = embed_fn(texts)
         for entry, vector in zip(entries, vectors):
             wiki_store.set_embedding(entry["entry_id"], entry["version"], vector)
-    except Exception:  # noqa: BLE001 - 임베딩 선반영은 최적화일 뿐, 실패해도 검색은
-        # PersistentEmbeddingCache의 lazy 폴백으로 정상 동작하므로 사이클을 막지 않는다.
+    except Exception:  # noqa: BLE001 - 최적화일 뿐, lazy 폴백이 있어 사이클을 막지 않음
         return None

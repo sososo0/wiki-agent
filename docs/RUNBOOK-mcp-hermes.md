@@ -187,37 +187,19 @@ hermes cron status          # "Gateway is running — cron jobs will fire automa
 
 ---
 
-## 구현 완료
+## 실제 동작 확인된 것
 
-이 런북 작성 당시엔 "다음에 깊게 팔 후보"였으나 이후 모두 구현됐다(상세는 README의
-"현재 상태" 참고).
+이 런북에서 다루는 MCP/Hermes 경로 외에 사람이 직접 써볼 수 있는 FastAPI 데모
+웹앱(`demo/app.py`)도 별도 진입점으로 있다 — 배포/위키 자가 갱신 확인 절차는
+README 참고. 구현 현황 전체는 README의 "현재 상태" 참고.
 
-- **dense 검색**: `core/retrieval.py` — BM25 + dense 임베딩 + RRF + cross-encoder rerank.
-- **피드백 파이프라인 1사이클**: `core/pipeline/` — gap 탐지 → 큐레이션 → 게이트 → shadow
-  반영, `scripts/run_update_cycle.py`로 오케스트레이션.
-- **평가 게이트**: `core/pipeline/promote.py` — 골드셋으로 base/candidate 평가 후 회귀
-  없을 때만 승격(`promote_if_better`), 회귀 시 커밋 안 함.
-
-이 RUNBOOK이 다루는 MCP/Hermes 서빙 경로 외에, 사람이 직접 써볼 수 있는 FastAPI 데모
-웹앱(`demo/app.py`)도 별도 진입점으로 추가됐다. 로컬 배포 방법과 위키 자가 갱신을 직접
-확인하는 절차는 README의 "로컬에서 데모 배포하기" / "위키 자가 갱신 확인하기" 참고.
-
-**사이클 자동 트리거**도 실제로 구성·기동했다(Step 6): Hermes Agent를 로컬에 설치하고
-(`~/.hermes/hermes-agent`, uv 가상환경), wiki-agent MCP 서버를 `search_wiki`/
-`submit_feedback` 2개 도구로 연결, `~/.hermes/scripts/wiki_agent_update_cycle.sh`
-래퍼 + `hermes cron create ... --no-agent` 로 매일 02:00 `scripts/run_update_cycle.py`가
-직접 실행되게 등록, `hermes gateway install`로 launchd 유저 서비스까지 띄워 cron이 실제로
-발동하는 상태(`hermes cron status` → "Gateway is running")까지 확인됨. 단, 이 launchd
-서비스는 로그인 세션 동안만 동작(위 Step 6 주의 참고) — 항상 켜진 서버 운영이 필요하면
-별도 환경(Linux + 시스템 서비스)으로 옮겨야 한다.
-
-사이클이 끝까지 도는지(120초 타임아웃 우회) 실제로 `hermes cron run <job_id>`로 트리거해
-검증했고, 그 결과로 골드셋의 의도적 unanswerable 문항이 반복 테스트 실행 때문에
-`retrieval_log`에 오염돼 `mine_gaps`가 가짜 gap으로 오인 → `curate`가 그럴듯한 오답을
-만들었지만 `promote_if_better`가 골드셋 회귀(escalation_correctness 1.0→0.0)로 정확히
-막아내는 것까지 실제로 관찰됨 — 안전장치가 설계대로 동작한다는 실증. 사이클 결과(요약/경고)는
-이제 데모 UI의 종모양 알림(`GET /notifications`)에도 쌓인다 — README의 "갱신 사이클 알림"
-참고.
+**사이클 자동 트리거를 끝까지 실제로 검증한 사례**: `hermes cron run <job_id>`로
+트리거해 120초 타임아웃 우회가 실제로 동작하는지 확인하던 중, 골드셋의 의도적
+unanswerable 문항이 반복 평가 실행으로 `retrieval_log`에 쌓여 `mine_gaps`가 진짜
+gap으로 오인 → `curate`가 그럴듯한 오답을 만들었지만 `promote_if_better`가 골드셋
+회귀(escalation_correctness 1.0→0.0)로 정확히 승격을 막아내는 것까지 관찰됨 —
+안전장치가 설계대로 동작한다는 실증. 사이클 결과는 데모 UI의 알림(`GET
+/notifications`)에도 쌓인다.
 
 ## 다음에 깊게 팔 후보
 

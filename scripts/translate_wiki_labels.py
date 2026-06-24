@@ -83,8 +83,7 @@ def _translate_batch(entries: List[Dict[str, Any]], *, model: str) -> Dict[str, 
     )
     text = next((b.text for b in resp.content if b.type == "text"), "")
     if resp.stop_reason == "max_tokens":
-        # 응답이 중간에 끊겨 JSON이 깨진 상태 — 파싱 시도조차 의미 없음
-        # (배치가 너무 큼). 거짓 번역을 만들지 않고 그대로 실패 처리.
+        # 응답이 중간에 끊겨 JSON이 깨짐 — 거짓 번역을 만들지 않고 실패 처리.
         return {}
     try:
         parsed = json.loads(_extract_json_array(text))

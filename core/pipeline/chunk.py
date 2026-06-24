@@ -5,19 +5,16 @@ parse.py가 만든 섹션 리스트를 LLM 큐레이션 입력 단위(청크)로
 순수 함수, core/eval 어느 쪽도 import하지 않음(core/pipeline/* 컨벤션).
 
 [청킹 전략 — 비용/레이턴시/검색품질 트레이드오프]
-- 헤더(섹션) 1개를 1차 단위로 삼는다: 마크다운 헤더는 보통 저자가 의도한 주제
-  경계라서, 임의 길이 슬라이딩 윈도우보다 청크당 주제 응집도가 높아 LLM
-  큐레이션 품질(topic/canonical 추출 정확도)이 좋다.
-- max_chars=2000(대략 400~500 토큰): curate.py의 default_llm_fn 출력
-  스케일(max_tokens=1024)과 맞춤. 너무 길면 LLM이 핵심을 못 뽑고 입력 토큰
-  비용이 늘고, 너무 짧으면 청크 수(=curate LLM 호출 수, 비용의 주된 드라이버)
-  가 늘어난다.
-- 오버랩 없음: 청크가 그대로 위키 엔트리가 되는 게 아니라 LLM이 청크를 읽고
-  자기완결적인 canonical/body_md를 다시 쓰므로(curate 단계), 경계 손실은
-  큐레이션에서 흡수된다. 오버랩을 쓰면 같은 정보가 인접 두 청크에 중복
-  생성되어 gate의 자카드 중복 체크에 걸리거나 LLM 호출이 낭비될 위험이 더 큼.
-- min_chars=80 미달(헤더만 있고 본문이 거의 없는 섹션)은 다음 섹션과 병합:
-  한두 문장뿐인 섹션마다 LLM 호출을 만드는 건 비용 대비 가치가 없음.
+- 헤더(섹션) 1개를 1차 단위로 삼는다: 마크다운 헤더는 저자가 의도한 주제 경계라서
+  임의 길이 슬라이딩 윈도우보다 청크당 주제 응집도가 높아 큐레이션 품질이 좋다.
+- max_chars=2000(약 400~500 토큰): curate.py의 default_llm_fn 출력 스케일
+  (max_tokens=1024)과 맞춤. 너무 길면 LLM이 핵심을 못 뽑고, 너무 짧으면 청크 수
+  (=curate LLM 호출 수, 비용의 주된 드라이버)가 늘어난다.
+- 오버랩 없음: LLM이 청크를 읽고 자기완결적인 canonical/body_md를 다시 쓰므로
+  경계 손실은 큐레이션에서 흡수된다. 오버랩을 쓰면 인접 청크에 정보가 중복
+  생성돼 gate의 자카드 중복 체크에 걸리거나 LLM 호출이 낭비될 위험이 크다.
+- min_chars=80 미달 섹션은 다음 섹션과 병합: 한두 문장뿐인 섹션마다 LLM 호출을
+  만드는 건 비용 대비 가치가 없음.
 """
 
 import hashlib
@@ -57,11 +54,9 @@ def _split_long(heading_path: List[str], text: str, max_chars: int) -> List[Dict
         if len(g) <= max_chars:
             out.append({"heading_path": heading_path, "text": g})
         else:
-            # 단일 문단이 max_chars보다 긴 극단적 경우(표/코드블록처럼 빈 줄
-            # 없는 긴 섹션): 단어 중간이 아니라 가능하면 공백에서 잘라야
-            # 밀도 높은 콘텐츠의 큐레이션 품질이 덜 떨어진다. 공백을 못
-            # 찾으면(단일 토큰이 max_chars보다 긴 진짜 극단적 경우) 어쩔
-            # 수 없이 그 지점에서 강제로 자른다.
+            # 단일 문단이 max_chars보다 긴 극단적 경우(표/코드블록 등): 단어
+            # 중간이 아니라 가능하면 공백에서 잘라 큐레이션 품질 저하를 줄인다.
+            # 공백을 못 찾으면 그 지점에서 강제로 자른다.
             remaining = g
             while remaining:
                 if len(remaining) <= max_chars:
@@ -114,13 +109,13 @@ def chunk_sections(
 def to_doc_candidates(
     doc_path: str, doc_hash: str, chunks: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """chunk -> mine.mine_gaps()의 출력과 같은 역할(후속 curate 단계의 입력)을
-    하는 candidate 리스트. 콘텐츠 기반 chunk_hash로 결정적.
+    """chunk -> mine.mine_gaps() 출력과 같은 역할(후속 curate 단계 입력)을 하는
+    candidate 리스트. 콘텐츠 기반 chunk_hash로 결정적.
 
-    chunk_hash는 공백을 정규화한 텍스트로 계산한다(c["text"] 자체, 즉 LLM에
-    넘기는 실제 콘텐츠는 그대로 둠) — 들여쓰기/줄바꿈/trailing space만 바뀐
-    재실행은 dedupe.py가 "콘텐츠 불변"으로 보고 skip 분기를 타서, 의미 없는
-    포맷팅 변경마다 전체 재큐레이션(LLM 호출)이 일어나는 걸 막는다."""
+    chunk_hash는 공백을 정규화한 텍스트로 계산한다(LLM에 넘기는 실제 콘텐츠는
+    그대로 둠) — 들여쓰기/trailing space만 바뀐 재실행은 dedupe.py가 "콘텐츠
+    불변"으로 보고 skip해, 의미 없는 포맷팅 변경마다 전체 재큐레이션이 일어나는
+    걸 막는다."""
     candidates = []
     for c in chunks:
         normalized = " ".join(c["text"].split())

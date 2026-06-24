@@ -46,9 +46,8 @@ cp .env.example .env   # ANTHROPIC_API_KEY 채우기
 > 배포(Docker)에는 `requirements.txt`만 설치한다 — `requirements-dev.txt`(pytest 등)는
 > 이미지 용량과 무관한 로컬 개발/테스트 전용 도구라 런타임 이미지에 넣지 않는다.
 
-> 시스템에 Python이 여러 개 있으면(pyenv, Homebrew 등) `uvicorn: command not found`나
-> `No module named ...` 오류가 날 수 있다. 항상 `source venv/bin/activate`로 활성화한
-> 터미널에서 실행할 것 — 새 터미널 탭마다 다시 활성화 필요.
+> Python이 여러 개 설치돼 있으면 새 터미널 탭마다 `source venv/bin/activate`를
+> 다시 실행할 것 — 안 하면 `uvicorn: command not found`/`No module named ...` 오류.
 
 ## 데모 실행
 
@@ -153,17 +152,18 @@ WIKI_AGENT_DB=/tmp/demo.db python scripts/ingest_doc.py docs/ --daily-cap 5
   시각화, 갱신 알림(🔔). `Dockerfile`로 컨테이너 빌드.
 - **갱신 사이클 자동 실행** — Hermes cron으로 매일 새벽 2시 자동 트리거(설정은
   [docs/RUNBOOK-mcp-hermes.md](docs/RUNBOOK-mcp-hermes.md)).
-- **데이터 파이프라인 스케일링** — `wiki_entry`/로그 테이블 인덱스, LRU 한도 걸린
-  임베딩 캐시(`core/lru_cache.py`), 로그 retention 스크립트(`scripts/purge_old_logs.py`,
-  cron에는 수동으로 추가), SQLite WAL 모드+busy_timeout(동시 쓰기 충돌 완화),
-  그래프 클러스터링/유사도 계산을 O(n²)에서 거의 선형으로(`core/graph.py`,
-  n=50,000 기준 37초→4초 실측). 자세한 내용은 [docs/demo-operations.md](docs/demo-operations.md).
+- **인증/보안** — 대화 조회를 `owner_token`으로 소유자 범위 제한, 알림 읽음 처리
+  관리자 토큰 게이트, stored XSS 수정.
+- **데이터 파이프라인 스케일링** — 인덱스, LRU 임베딩 캐시(`core/lru_cache.py`),
+  로그 retention(`scripts/purge_old_logs.py`), WAL+busy_timeout, 그래프 클러스터링을
+  O(n²)에서 거의 선형으로(`core/graph.py`). 자세한 내용은
+  [docs/demo-operations.md](docs/demo-operations.md).
 
 **구현 예정**
 
 - **공개 환경에서의 승인 워크플로** — 지금은 평가 회귀만으로 자동 승격. shadow를
   사람이 승인해야 active로 가는 단계 추가 예정.
 - **멀티유저화** — 단일 SQLite 파일·단일 프로세스(WAL로 읽기-쓰기 경합은 줄였지만
-  쓰기끼리는 여전히 1개만). Postgres 전환, 대화 조회 인증(`owner_token`) 등은 계획 중.
+  쓰기끼리는 여전히 1개만). Postgres 전환은 계획 중.
 - **데이터 파이프라인 스케일링 (남은 항목)** — curate 호출이 daily_cap에 안 묶임 등
   — 자세한 목록은 [docs/demo-operations.md](docs/demo-operations.md).

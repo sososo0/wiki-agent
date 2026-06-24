@@ -71,9 +71,8 @@ def decide_next_action(task, transcript, model=DECIDE_MODEL):
     """LLM 1회 호출로 다음 행동 결정: 검색을 더 할지, 지금까지 모은 정보로
     답할지. {"action": "search", "query": str} | {"action": "answer", "answer": str}.
 
-    모델이 지시를 무시하고 JSON 대신 긴 산문 답변을 바로 써버리는 경우가 haiku에서
-    관찰됨(특히 정보가 충분히 모인 턴) — 그 경우 JSON 파싱이 실패해도 크래시하지
-    않고, 응답 전체를 answer로 취급한다(모델이 사실상 답을 한 것이므로 의미상 맞음)."""
+    모델이 지시를 무시하고 JSON 대신 산문 답변을 바로 써버리는 경우가 있어 —
+    그때 JSON 파싱이 실패해도 응답 전체를 answer로 취급한다(의미상 맞음)."""
     prompt = (
         "You are an agent answering a task by searching a wiki knowledge base. "
         "You can call search multiple times to gather information from "
@@ -123,9 +122,8 @@ def run_agent_task(
     task, *, search_fn=None, decide_fn=None, force_answer_fn=None,
     max_turns=4, k=5,
 ):
-    """매 턴 decide_fn(task, transcript) 호출 -> "search"면 search_fn(query, k)
-    실행 후 transcript에 추가, "answer"면 종료. max_turns 도달 시 force_answer_fn
-    으로 강제 종료(그때까지 모은 정보로 최종 답 1회 더 요청)."""
+    """매 턴 decide_fn 호출 -> "search"면 검색 후 transcript에 추가, "answer"면
+    종료. max_turns 도달 시 force_answer_fn으로 강제 종료."""
     search_fn = search_fn or wiki_store.search_wiki
     decide_fn = decide_fn or decide_next_action
     force_answer_fn = force_answer_fn or force_final_answer

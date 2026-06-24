@@ -1,17 +1,15 @@
 """
 wiki-agent / core / pipeline / gate.py
 
-오염 게이트. patch가 shadow로라도 DB에 들어가기 전 마지막 검문소.
-CLAUDE.md HARD CONSTRAINT를 코드로 강제한다: agent_generated 단독(미검증
-source) 승격/반영 금지 — curated_from_web도 LLM이 스스로 근거를 대는 같은
-위험군이라 동일하게 적용한다. 비용이 드는 체크(LLM grounding)는 가장 마지막에
-돌려 싸고 결정적인 체크부터 빨리 떨어뜨린다(daily_cap, source 다양성,
-자카드 중복은 전부 네트워크 없이 결정론적).
+오염 게이트. patch가 shadow로라도 DB에 들어가기 전 마지막 검문소. CLAUDE.md HARD
+CONSTRAINT를 코드로 강제한다: agent_generated 단독(미검증 source) 승격/반영 금지 —
+curated_from_web도 LLM이 스스로 근거를 대는 같은 위험군이라 동일 적용. 비용이 드는
+체크(LLM grounding)는 마지막에 돌려 싸고 결정적인 체크부터 빨리 떨어뜨린다.
 
 grounding 체크(default_judge_fn)는 "source 질문과 그럴듯하게 들어맞는가" 같은
-막연한 기준이 아니라, 자기모순/기존 active(검증된) 엔트리와의 직접 모순/환각
-(지어낸 구체적 사실) 3가지 binary 신호를 판정한다 — source는 사용자 질문
-원문일 뿐 사실을 담고 있지 않으므로, 검증 가능한 신호로 좁힌 것.
+막연한 기준이 아니라 자기모순/기존 active 엔트리와의 직접 모순/환각 3가지 binary
+신호를 판정한다 — source는 사용자 질문 원문일 뿐 사실을 담지 않으므로, 검증
+가능한 신호로 좁힌 것.
 """
 
 import json
@@ -45,10 +43,9 @@ def default_judge_fn(
     existing_entries: List[Dict[str, Any]],
     model: str = JUDGE_MODEL,
 ) -> Tuple[float, str]:
-    """LLM-as-judge: source 질문과의 막연한 "그럴듯함"이 아니라, 자기모순/기존
-    검증된 active 엔트리와의 모순/환각(지어낸 구체적 사실) 3가지를 직접 binary로
-    판정한다. 하나라도 true면 score=0.0, 전부 false면 score=1.0. (score, 설명)
-    반환."""
+    """LLM-as-judge: 자기모순/기존 검증된 active 엔트리와의 모순/환각 3가지를 직접
+    binary로 판정한다. 하나라도 true면 score=0.0, 전부 false면 score=1.0.
+    (score, 설명) 반환."""
     existing_text = "\n".join(
         f"- [{e.get('entry_id')}] {e.get('topic')}: {e.get('canonical')}"
         for e in existing_entries
@@ -121,13 +118,11 @@ def passes_gate(
 ) -> Tuple[bool, str]:
     """patch가 shadow로 들어가도 되는지 5단계로 검사. (통과여부, 이유) 반환.
 
-    pending_shadow_entries: 이번/이전 사이클에서 이미 shadow로 쓴(아직 active로
-    승격 안 된) 후보들. 자카드 중복 체크(4단계)에서만 existing_entries와 합쳐서
-    본다 — judge_fn(5단계)에는 절대 안 넘긴다. judge 프롬프트는 "검증된(active)
-    엔트리와의 모순"만 보도록 설계돼 있어(아직 검증 안 된 shadow를 검증된 것처럼
-    보여주면 그 설계가 깨짐). 안 주면(기본 None) 기존 동작과 동일 — active만 보고
-    중복 체크하므로, 같은 gap이 사이클마다 비슷한 shadow를 계속 쌓을 수 있던
-    문제가 있었다."""
+    pending_shadow_entries: 이번/이전 사이클에서 이미 shadow로 쓴 후보들. 자카드
+    중복 체크(4단계)에서만 existing_entries와 합쳐서 본다 — judge_fn(5단계)에는
+    절대 안 넘긴다(judge 프롬프트는 "검증된 active 엔트리와의 모순"만 보도록
+    설계돼 있어 깨짐 방지). 안 주면(기본 None) active만 보고 중복 체크하므로,
+    같은 gap이 사이클마다 비슷한 shadow를 계속 쌓을 수 있던 문제가 있었다."""
     # 1. provenance 규칙 (★ HARD CONSTRAINT: LLM이 스스로 근거를 대는 provenance
     # — agent_generated, curated_from_web — 단독(미검증 source) 승격 금지)
     if patch.get("provenance") in ("agent_generated", "curated_from_web"):

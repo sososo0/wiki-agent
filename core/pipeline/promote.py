@@ -1,17 +1,16 @@
 """
 wiki-agent / core / pipeline / promote.py
 
-"롤백은 애초에 커밋하지 않음으로 구현한다." search_wiki()는 호출마다 새
-sqlite 커넥션을 열어 공유 트랜잭션으로 "가상 승격 상태"를 보여줄 수 없으므로,
-먼저 active+shadow를 메모리에서 합친 candidate 엔트리 리스트로
-retrieval.hybrid_search를 직접 호출해 평가하고, 회귀가 없을 때만 실제
-DB에 커밋한다(shadow -> active, supersedes 대상은 병합 후 candidate 행을
+"롤백은 애초에 커밋하지 않음으로 구현한다." search_wiki()는 호출마다 새 sqlite
+커넥션을 열어 공유 트랜잭션으로 "가상 승격 상태"를 보여줄 수 없으므로, active+shadow
+를 메모리에서 합친 candidate 엔트리 리스트로 retrieval.hybrid_search를 직접 호출해
+평가하고, 회귀가 없을 때만 실제 DB에 커밋한다(shadow -> active, supersedes 대상은
 deprecated로 강등). 회귀가 있으면 아무 것도 쓰지 않는다.
 
-골드셋 회귀 체크만으로는 새로 mine된 gap이 실제로 메워졌는지 알 수 없다(골드셋엔
-새 gap 주제의 문항이 없으므로). evaluate_gap_recall은 가짜 gold_answer를 만들지
-않고, 각 shadow 엔트리를 만든 계기였던 source 질문들을 그대로 다시 검색해 그
-엔트리가 실제로 잡히는지만 본다 — promote_if_better가 이 결과도 회귀 조건에 포함.
+골드셋 회귀 체크만으로는 새로 mine된 gap이 실제로 메워졌는지 알 수 없다(골드셋엔 새
+gap 주제의 문항이 없으므로). evaluate_gap_recall은 가짜 gold_answer 없이, 각 shadow
+엔트리를 만든 계기였던 source 질문들을 그대로 다시 검색해 실제로 잡히는지만 본다 —
+promote_if_better가 이 결과도 회귀 조건에 포함.
 """
 
 import re
@@ -79,8 +78,8 @@ def evaluate_gap_recall(
     shadow_rows: List[Dict[str, Any]], candidate_retriever: Callable, k: int = 5
 ) -> Dict[str, Any]:
     """각 shadow 엔트리가 자신을 만든 계기였던 source 질문들에 대해 실제로
-    검색되는지 확인 — 고정 골드셋이 모르는 신규 gap 주제의 개선 여부를
-    가짜 gold_answer 없이 검증하는 유일한 방법(순수 retrieval 신호)."""
+    검색되는지 확인 — 고정 골드셋이 모르는 신규 gap 주제의 개선 여부를 가짜
+    gold_answer 없이 검증하는 유일한 방법."""
     per_entry = []
     for s in shadow_rows:
         target_id = s.get("supersedes") or s["entry_id"]
@@ -108,15 +107,14 @@ def promote_if_better(
 ) -> Dict[str, Any]:
     """base(실제 active) vs candidate(active+shadow 시뮬레이션) 비교.
 
-    recall@k/correctness가 골드셋 전체 기준으로 떨어지면(gold_set_regressed)
-    그 회귀를 특정 entry 탓이라고 추가 비용(entry별 재평가) 없이 확신할 수
-    없으므로 안전하게 전체를 막는다(기존 all-or-nothing 동작 그대로).
+    recall@k/correctness가 골드셋 전체 기준으로 떨어지면(gold_set_regressed) 그
+    회귀를 특정 entry 탓이라고 추가 비용 없이 확신할 수 없으므로 안전하게 전체를
+    막는다(all-or-nothing).
 
     골드셋 자체는 안 떨어졌는데 mean_gap_recall만 임계치 미달인 경우는 다르다 —
-    evaluate_gap_recall이 이미 entry별 gap_recall을 공짜로 계산해주므로, 자기
-    출처 질문도 못 잡는 entry만 걸러내고 나머지는 승격한다(부분 승격). 한
-    사이클에 쌓인 shadow 중 단 하나가 나쁘다고 나머지 좋은 후보까지 영원히
-    막히던 문제를 줄인다.
+    자기 출처 질문도 못 잡는 entry만 걸러내고 나머지는 승격한다(부분 승격). 한
+    사이클에 쌓인 shadow 중 하나가 나쁘다고 나머지 좋은 후보까지 막히던 문제를
+    줄인다.
     """
     base = evaluate_fn(wiki_store.search_wiki, gold, k=k)
     candidate_retriever = simulate_candidate_retriever()

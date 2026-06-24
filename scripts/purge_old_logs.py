@@ -10,8 +10,7 @@ conversation_log는 의도적으로 건드리지 않는다 — `/conversations` 
 (core/wiki_store.purge_old_logs 주석 참고).
 
 run_update_cycle.py의 cron에 자동으로 묶지 않았다 — 데이터 삭제는 되돌릴 수 없는
-작업이라, 기존에 매일 자동 실행되는 사이클에 조용히 추가하기보다 운영자가 명시적으로
-이 스크립트를 별도 cron job으로 추가하기를 권장한다.
+작업이라, 운영자가 명시적으로 이 스크립트를 별도 cron job으로 추가하기를 권장한다.
 
 실행: WIKI_AGENT_DB=<절대경로> python scripts/purge_old_logs.py [--retention-days 30]
 """

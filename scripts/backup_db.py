@@ -6,8 +6,8 @@ WIKI_AGENT_DB가 가리키는 SQLite 파일을 통째로 백업하는 신뢰된 
 깨질 위험이 있다 — sqlite3 Online Backup API를 쓰는 core/wiki_store.backup_db가
 실행 중에도 일관된 스냅샷을 보장한다.
 
-run_update_cycle.py의 cron에 자동으로 묶지 않았다 — purge_old_logs.py와 같은 이유로,
-백업 빈도/보관 위치는 운영자가 직접 정해 별도 cron job으로 추가하길 권장한다.
+run_update_cycle.py의 cron에 자동으로 묶지 않았다 — 백업 빈도/보관 위치는
+운영자가 직접 정해 별도 cron job으로 추가하길 권장한다.
 
 실행: WIKI_AGENT_DB=<절대경로> python scripts/backup_db.py [--dest <백업파일경로>]
    (--dest 생략 시 wiki_agent_backup_<unix ts>.db를 현재 디렉터리에 생성)

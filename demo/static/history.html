@@ -223,9 +223,8 @@
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  // 시작/종료 둘 다 YYYY-MM-DD라 dateKey와 사전식 비교가 곧 날짜 비교와
-  // 동치 — Date 파싱(타임존 이슈) 없이 안전하게 범위를 비교한다. 시작=종료로
-  // 입력하면 예전의 "정확히 그 날" 필터와 동일하게 동작한다.
+  // YYYY-MM-DD 문자열 비교 = 날짜 비교(Date 파싱/타임존 이슈 없음).
+  // 시작=종료면 예전의 "정확히 그 날" 필터와 동일하게 동작한다.
   function inDateRange(ts, startStr, endStr) {
     if (!startStr && !endStr) return true;
     const key = dateKey(ts);
@@ -622,10 +621,9 @@
     const endStr = document.querySelector('[data-col="ts-end"]').value;
 
     const filters = {};
-    // input(자유 검색)과 select(값이 정해진 컬럼용 드롭다운) 둘 다 같은
-    // data-col/.value 규약을 쓰므로 한 셀렉터로 같이 모은다. ts-start/ts-end는
-    // 위에서 따로 읽었으니(날짜 범위 비교는 substring 매칭과 다른 로직이라
-    // 일반 필터 객체에는 안 넣는다) 여기서 제외한다.
+    // input/select 둘 다 같은 data-col 규약이라 한 셀렉터로 모은다.
+    // ts-start/ts-end는 위에서 따로 읽었으니(범위 비교라 substring 매칭과
+    // 다름) 여기서 제외.
     document.querySelectorAll(".filter-row [data-col]").forEach((el) => {
       if (el.dataset.col === "ts-start" || el.dataset.col === "ts-end") return;
       const v = el.value.trim().toLowerCase();
@@ -653,9 +651,8 @@
     // 표 전체를 숨기면 입력창도 같이 사라져서 필터 해제가 불가능해진다.
     document.getElementById("no-match-hint").style.display = matchedIdx.length ? "none" : "";
 
-    // 기간 평균은 "지금 일치하는(다른 필터까지 포함한) 사이클들" 중 기간
-    // 조건을 만족하는 것 — matchedIdx 기준(표시 개수로 잘린 shownIdx 기준이
-    // 아님). 표시 개수를 바꿔도 기간 평균값 자체는 흔들리지 않아야 하기 때문.
+    // 기간 평균은 matchedIdx 기준(shownIdx 아님) — 표시 개수를 바꿔도
+    // 기간 평균값 자체는 흔들리면 안 되기 때문.
     const periodActive = !!(startStr || endStr);
     lastPeriodCycles = periodActive ? matchedIdx.map((i) => allCycles[i]) : null;
 

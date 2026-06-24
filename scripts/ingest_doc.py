@@ -12,20 +12,15 @@ daily_cap/gate/promote는 그대로 재사용 — daily_cap은 wiki_store.count_
 ("shadow", ...)가 provenance를 구분하지 않고 전역으로 세므로 로그 기반 갱신과
 자동으로 합산된다.
 
-콘텐츠가 안 바뀐 청크는 dedupe가 "skip"으로 분류해 curate(LLM 호출)를 아예
-건너뛴다 — 같은 문서를 재실행해도 비용이 들지 않는 멱등성의 핵심. 게이트가
-거부한 청크도 동일하게 chunk_hash 기준으로 기억해(status="rejected" 마커,
-dedupe.rejected_entry_id) "skip_rejected"로 분류한다 — 콘텐츠가 그대로인데
-거부된 청크를 재실행마다 다시 큐레이션/judge에 돌려 비용을 반복 지불하지
-않게 한다. 문서 내용이 바뀌면(chunk_hash가 달라지면) 자동으로 새 주소가 되어
-다시 시도된다.
+콘텐츠가 안 바뀐 청크는 dedupe가 "skip"으로 분류해 curate(LLM 호출)를 건너뛴다
+— 재실행 멱등성의 핵심. 게이트가 거부한 청크도 chunk_hash 기준으로 기억해
+"skip_rejected"로 분류, 콘텐츠가 그대로면 재실행마다 큐레이션/judge 비용을
+반복 지불하지 않는다. chunk_hash가 바뀌면 새 주소로 취급되어 다시 시도된다.
 
-게이트의 grounding judge는 기본적으로 gate.default_judge_fn을 쓰는데, 이건
-sources의 "query" 필드만 읽어서 문서 출처(query 없음)는 source dict 자체를
-stringify해 judge에 넘긴다 — 실제 청크 본문을 한 번도 보지 못한 채 판단하는
-셈이라 거부율이 비정상적으로 높아진다. gate.py는 무수정 대상이라, judge_fn
-미주입 시 curate.make_doc_judge_fn으로 만든 문서 전용 judge(원본 chunk_text를
-직접 프롬프트에 넣음)를 기본값으로 주입한다.
+게이트의 기본 grounding judge(gate.default_judge_fn)는 sources의 "query"
+필드만 읽어서, 문서 출처(query 없음)는 실제 청크 본문을 못 보고 판단해
+거부율이 비정상적으로 높아진다. gate.py는 무수정 대상이라, judge_fn 미주입
+시 curate.make_doc_judge_fn으로 만든 문서 전용 judge를 기본값으로 주입한다.
 
 실행: python scripts/ingest_doc.py <path...> [--daily-cap N] [--min-sources 1]
 """
@@ -127,9 +122,8 @@ def run_doc_ingest(
     since_ts = time.time() - 86400
 
     # judge_fn 미주입 시 문서 전용 grounding judge를 기본으로 쓴다 — gate.py의
-    # default_judge_fn은 sources의 "query" 필드만 읽어서 문서 출처(query 없음)는
-    # source dict를 그대로 stringify해 judge에 넘기게 되어 실제 청크 본문을 보지
-    # 못한다(gate.py는 무수정 대상). chunk_text_by_entry_id는 후보를 처리하며 채움.
+    # default_judge_fn은 sources의 "query" 필드만 읽어 문서 출처(query 없음)는
+    # 실제 청크 본문을 못 보고 판단한다(gate.py는 무수정 대상).
     chunk_text_by_entry_id: Dict[str, str] = {}
     doc_judge_fn = judge_fn or curate.make_doc_judge_fn(chunk_text_by_entry_id)
 
@@ -170,7 +164,7 @@ def run_doc_ingest(
             patch["supersedes"] = op_info["supersedes"]
         chunk_text_by_entry_id[patch["entry_id"]] = cand["text"]
 
-        # 새 버전이 대체하려는 자기 자신과는 "근접 중복"으로 막히면 안 되므로 게이트
+        # 새 버전이 대체할 자기 자신과 "근접 중복"으로 막히면 안 되므로 게이트의
         # 중복/모순 체크 대상에서 제외한다(의도된 갱신, 우연한 중복이 아님).
         gate_existing = existing_active_entries
         if op_info["supersedes"]:

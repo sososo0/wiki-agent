@@ -27,16 +27,13 @@ def cluster_paraphrased_queries(
     embed_fn: Optional[Callable] = None,
     similarity_threshold: float = 0.85,
 ) -> List[Dict[str, Any]]:
-    """norm_query(소문자+공백정리)가 다른데 의미가 같은 질문(paraphrase)을 임베딩
-    유사도로 묶어, 같은 클러스터의 norm_query를 대표 문자열로 통일한다.
-    core/pipeline/mine.py의 그룹핑은 여전히 단순 exact-match(norm_query)이므로
-    mine.py 자체는 무수정 — "DB/모델 없음" 순수 함수 원칙(파일 docstring)을
-    지키면서, 같은 의미를 다르게 표현한 질문이 각각 min_freq 미달로 영원히
-    gap을 못 넘는 문제를 여기서 흡수한다.
+    """norm_query가 다른데 의미가 같은 질문(paraphrase)을 임베딩 유사도로 묶어,
+    같은 클러스터의 norm_query를 대표 문자열로 통일한다. mine.py의 그룹핑은
+    여전히 단순 exact-match라 mine.py 자체는 무수정 — 같은 의미를 다르게 표현한
+    질문이 각각 min_freq 미달로 영원히 gap을 못 넘는 문제를 여기서 흡수한다.
 
-    opt-in 전용 함수라 호출 안 하면(scripts/run_update_cycle.py의
-    --cluster-paraphrases 플래그가 기본 off) 모델이 전혀 로딩되지 않는다.
-    embed_fn 안 주면 core.retrieval.default_embed_fn(지연 import)을 쓴다."""
+    opt-in 전용(--cluster-paraphrases 플래그 기본 off)이라 호출 안 하면 모델이
+    전혀 로딩되지 않는다."""
     if not rows:
         return rows
 
@@ -49,7 +46,7 @@ def cluster_paraphrased_queries(
         embed_fn = retrieval.default_embed_fn
 
     vecs = np.asarray(embed_fn(unique_queries))
-    sims = vecs @ vecs.T  # normalize_embeddings=True 가정(retrieval.py와 동일 전제)
+    sims = vecs @ vecs.T  # normalize_embeddings=True 가정
 
     n = len(unique_queries)
     parent = list(range(n))
@@ -69,8 +66,7 @@ def cluster_paraphrased_queries(
             if sims[i, j] >= similarity_threshold:
                 union(i, j)
 
-    # 클러스터별 대표 = 사전순 최솟값(결정적 선택) — 전체를 한 번 더 스캔해 각
-    # 클러스터 루트에 대해 지금까지 본 최솟값을 갱신하면 끝.
+    # 클러스터별 대표 = 사전순 최솟값(결정적 선택)
     cluster_rep: Dict[int, str] = {}
     for i in range(n):
         root = find(i)
