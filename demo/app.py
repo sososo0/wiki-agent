@@ -43,6 +43,7 @@ logger = logging.getLogger("wiki_agent.demo")
 
 DEMO_MODEL = os.environ.get("WIKI_AGENT_DEMO_MODEL", "claude-haiku-4-5")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+EMBED_CACHE_MAX = int(os.environ.get("WIKI_AGENT_EMBED_CACHE_MAX", "2000"))
 
 
 @asynccontextmanager
@@ -55,8 +56,13 @@ app = FastAPI(title="wiki-agent demo", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _client = None
-_graph_embed_cache: dict = {}
-_search_embed_cache: dict = {}
+# entry_id+version 키 임베딩 캐시 — 코퍼스/deprecated·rejected 엔트리가 쌓여도
+# 메모리가 무한히 자라지 않게 LRU 한도를 둔다(core/lru_cache.py). 메모리 미스는
+# DB(wiki_embedding)를 먼저 보고서야 재인코딩하므로, 프로세스 재시작이나
+# serving/mcp_server.py와의 프로세스 간 공유에도 재인코딩 비용이 들지 않는다
+# (core/wiki_store.PersistentEmbeddingCache).
+_graph_embed_cache = wiki_store.PersistentEmbeddingCache(maxsize=EMBED_CACHE_MAX)
+_search_embed_cache = wiki_store.PersistentEmbeddingCache(maxsize=EMBED_CACHE_MAX)
 
 # API 호출 횟수 제한 — Anthropic API는 호출당 비용이 들고 데모는 불특정 다수가
 # 찍어볼 수 있어, 비용 부담 때문에 LLM 호출(generate/generate_title) 자체를

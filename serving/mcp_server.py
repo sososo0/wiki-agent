@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mcp.server.fastmcp import FastMCP            # pip install mcp
 from core.wiki_store import (
     init_db, search_wiki as _search, submit_feedback as _feedback,
+    PersistentEmbeddingCache,
 )
 
 init_db(seed=True)                                 # 최초 1회 스키마+시드 보장
@@ -31,8 +32,12 @@ mcp = FastMCP("wiki-agent")
 # entry_id+version 키 임베딩 캐시. 안 주면(demo/app.py도 동일 패턴) search_wiki가
 # 매 호출마다 활성 엔트리 전체(현재 400여 개)를 재인코딩한다 — 이 프로세스는
 # stdio로 오래 사는 서버이므로 모듈 전역에 들고 다니면서 콘텐츠가 안 바뀐
-# 엔트리는 재인코딩을 건너뛴다(core/retrieval.py _entry_vectors 참고).
-_search_embed_cache: dict = {}
+# 엔트리는 재인코딩을 건너뛴다(core/retrieval.py _entry_vectors 참고). LRU
+# 메모리 한도(core/lru_cache.py)를 1차 캐시로 두고, 미스가 나면 DB(wiki_embedding)
+# 를 먼저 본다 — 프로세스 재시작이나 demo/app.py와의 프로세스 간 공유에도
+# 재인코딩 비용이 들지 않는다(core/wiki_store.PersistentEmbeddingCache).
+_search_embed_cache = PersistentEmbeddingCache(
+    maxsize=int(os.environ.get("WIKI_AGENT_EMBED_CACHE_MAX", "2000")))
 
 
 @mcp.tool()
