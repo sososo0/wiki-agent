@@ -83,6 +83,53 @@ def test_ingest_creates_shadow_for_new_doc(tmp_path, monkeypatch):
         assert eid in active_ids
 
 
+def test_dry_run_reports_create_ops_without_calling_llm_or_writing_db(tmp_path, monkeypatch):
+    """dry_run=True면 어떤 청크가 create/update/skip 대상인지만 보고하고,
+    curate(LLM)/gate(judge LLM)/wiki_store.add_entry/promote(eval LLM) 전부
+    건너뛰어야 한다 — 비용 없이 미리 점검할 수 있어야 하는 게 핵심."""
+    _init_db(tmp_path, monkeypatch)
+    doc_path = tmp_path / "doc.md"
+    doc_path.write_text(DOC_TEXT, encoding="utf-8")
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("dry_run인데 LLM 호출 경로가 실행됨")
+
+    active_before = wiki_store.list_active_entries()  # init_db(seed=True)의 시드 5개
+
+    result = run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_should_not_be_called, judge_fn=_should_not_be_called,
+        evaluate_fn=_should_not_be_called,
+        dry_run=True,
+    )
+
+    assert result["llm_calls"] == 0
+    assert result["shadow_written"] == []
+    assert result["promote"] is None
+    assert len(result["would_curate"]) == 2
+    assert {c["op"] for c in result["would_curate"]} == {"create"}
+    assert wiki_store.list_active_entries() == active_before  # 시드 외 새 엔트리 없음
+    assert wiki_store.list_shadow_entries() == []
+
+
+def test_dry_run_still_reports_skip_for_unchanged_chunks(tmp_path, monkeypatch):
+    """이미 처리된(콘텐츠 불변) 청크는 dry_run에서도 skip으로 잡혀야 한다 —
+    dedupe 분류 자체는 평소와 동일하게 동작해야 의미가 있다."""
+    _init_db(tmp_path, monkeypatch)
+    doc_path = tmp_path / "doc.md"
+    doc_path.write_text(DOC_TEXT, encoding="utf-8")
+
+    run_doc_ingest(
+        [str(doc_path)],
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+
+    result = run_doc_ingest([str(doc_path)], dry_run=True)
+
+    assert result["would_curate"] == []
+    assert result["skipped_chunks"] == 2
+
+
 def test_ingest_is_idempotent_on_unchanged_doc(tmp_path, monkeypatch):
     _init_db(tmp_path, monkeypatch)
     doc_path = tmp_path / "doc.md"

@@ -69,16 +69,23 @@ def run_doc_ingest(
     llm_fn: Optional[Callable] = None,
     judge_fn: Optional[Callable] = None,
     evaluate_fn: Optional[Callable] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
-    from eval.run_eval import GOLD_PATH, evaluate, load_gold
-
-    evaluate_fn = evaluate_fn or evaluate
+    """dry_run=True면 parse/chunk/dedupe까지만 실행하고 각 candidate가 어떤
+    op(create/update/skip/skip_rejected)로 분류되는지만 보고한다 — curate(LLM
+    호출), gate(judge LLM 호출), wiki_store.add_entry(DB 쓰기), promote(eval LLM
+    호출 + 가능하면 DB 쓰기) 전부 건너뛴다. 콘텐츠/비용을 미리 점검하고 싶을 때
+    실제 LLM 호출·DB 변경 없이 실행할 수 있게 한다."""
+    if not dry_run:
+        from eval.run_eval import GOLD_PATH, evaluate, load_gold
+        evaluate_fn = evaluate_fn or evaluate
 
     summary: Dict[str, Any] = {
         "parsed_files": [],
         "failed_files": [],
         "skipped_chunks": 0,
         "skipped_rejected_chunks": 0,
+        "would_curate": [],
         "shadow_written": [],
         "rejected": [],
         "llm_calls": 0,
@@ -112,6 +119,13 @@ def run_doc_ingest(
             continue
         if op_info["op"] == "skip_rejected":
             summary["skipped_rejected_chunks"] += 1
+            continue
+
+        if dry_run:
+            summary["would_curate"].append({
+                "doc_path": cand["doc_path"], "chunk_index": cand["chunk_index"],
+                "op": op_info["op"], "entry_id": op_info["entry_id"],
+            })
             continue
 
         summary["llm_calls"] += 1
@@ -171,6 +185,9 @@ def run_doc_ingest(
         }
         reindex.reindex_changed([patch["entry_id"]])
 
+    if dry_run:
+        return summary
+
     gold = load_gold(gold_path or GOLD_PATH)
     summary["promote"] = promote.promote_if_better(gold, k=k, evaluate_fn=evaluate_fn)
     return summary
@@ -185,6 +202,10 @@ def main():
     parser.add_argument("--min-chars", type=int, default=chunk.DEFAULT_MIN_CHARS)
     parser.add_argument("--daily-cap", type=int, default=20)
     parser.add_argument("--min-sources", type=int, default=1)
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="LLM을 호출하거나 DB에 쓰지 않고, 각 청크가 create/update/skip/"
+             "skip_rejected 중 무엇으로 분류되는지만 미리 보여준다(비용 없음).")
     args = parser.parse_args()
 
     wiki_store.init_db(seed=True)
@@ -192,6 +213,7 @@ def main():
         args.paths, gold_path=args.gold, k=args.k,
         max_chars=args.max_chars, min_chars=args.min_chars,
         daily_cap=args.daily_cap, min_sources=args.min_sources,
+        dry_run=args.dry_run,
     )
 
     print(f"parsed files: {len(result['parsed_files'])}")
@@ -199,6 +221,13 @@ def main():
         print(f"failed files: {result['failed_files']}")
     print(f"skipped chunks (unchanged): {result['skipped_chunks']}")
     print(f"skipped chunks (already rejected, unchanged): {result['skipped_rejected_chunks']}")
+
+    if args.dry_run:
+        print(f"would curate (LLM call + gate, not run): {len(result['would_curate'])}")
+        for item in result["would_curate"]:
+            print(f"  - [{item['op']}] {item['doc_path']}#{item['chunk_index']} -> {item['entry_id']}")
+        return
+
     print(f"llm calls: {result['llm_calls']}")
     print(f"shadow written: {result['shadow_written']}")
     print(f"rejected: {result['rejected']}")

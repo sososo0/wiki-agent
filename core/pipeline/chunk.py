@@ -27,6 +27,14 @@ DEFAULT_MAX_CHARS = 2000
 DEFAULT_MIN_CHARS = 80
 
 
+def _last_whitespace_before(text: str, limit: int) -> int:
+    """text[:limit] 안에서 가장 뒤쪽 공백 문자의 인덱스, 없으면 -1."""
+    for i in range(min(limit, len(text)) - 1, -1, -1):
+        if text[i].isspace():
+            return i
+    return -1
+
+
 def _split_long(heading_path: List[str], text: str, max_chars: int) -> List[Dict[str, Any]]:
     if len(text) <= max_chars:
         return [{"heading_path": heading_path, "text": text}]
@@ -49,9 +57,21 @@ def _split_long(heading_path: List[str], text: str, max_chars: int) -> List[Dict
         if len(g) <= max_chars:
             out.append({"heading_path": heading_path, "text": g})
         else:
-            # 단일 문단이 max_chars보다 긴 극단적 경우: 강제 슬라이스
-            for i in range(0, len(g), max_chars):
-                out.append({"heading_path": heading_path, "text": g[i:i + max_chars]})
+            # 단일 문단이 max_chars보다 긴 극단적 경우(표/코드블록처럼 빈 줄
+            # 없는 긴 섹션): 단어 중간이 아니라 가능하면 공백에서 잘라야
+            # 밀도 높은 콘텐츠의 큐레이션 품질이 덜 떨어진다. 공백을 못
+            # 찾으면(단일 토큰이 max_chars보다 긴 진짜 극단적 경우) 어쩔
+            # 수 없이 그 지점에서 강제로 자른다.
+            remaining = g
+            while remaining:
+                if len(remaining) <= max_chars:
+                    out.append({"heading_path": heading_path, "text": remaining})
+                    break
+                cut = _last_whitespace_before(remaining, max_chars)
+                if cut <= 0:
+                    cut = max_chars
+                out.append({"heading_path": heading_path, "text": remaining[:cut].rstrip()})
+                remaining = remaining[cut:].lstrip()
     return out
 
 
