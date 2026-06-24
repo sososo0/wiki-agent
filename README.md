@@ -3,6 +3,12 @@
 자가 갱신형(self-updating) 에이전트 RAG. 대화/검색 로그가 위키 지식베이스를
 스스로 갱신하고, 그 효과를 eval 하니스로 정량 증명하는 프로젝트.
 
+## 데모 영상
+
+질문 → 답변(근거 출처 포함) → 출처 클릭으로 그래프에서 해당 위키 항목 확인까지의 흐름.
+
+https://github.com/user-attachments/assets/d06c65fb-b4a5-4424-a307-5811f315f0e5
+
 ## 핵심 아이디어
 
 1. **서빙**: MCP 서버가 `search_wiki`/`submit_feedback`만 노출. 검색·대화·피드백은
@@ -66,6 +72,34 @@ docker run -d --name wiki-agent-demo -p 8000:8000 \
   -e WIKI_AGENT_DB=/data/wiki_agent.db --env-file .env \
   -v /tmp/wiki-agent-docker-data:/data wiki-agent-demo
 ```
+
+## 화면별 기능
+
+### 채팅 (`/`)
+
+질문을 입력하면 위키를 검색해 답변하고, 답변 근거가 된 위키 항목을 출처로
+달아준다(클릭하면 그래프 화면에서 해당 항목으로 바로 이동). 질문이 모호하면
+바로 답하는 대신 명확화 질문으로 되묻는다(옵션 클릭 또는 직접 입력으로 답변).
+답변마다 👍/👎 피드백을 남길 수 있고, 이 피드백도 갱신 파이프라인의 신호로
+로그에 쌓인다. 헤더에서 새 대화 시작, 이전 대화 목록(내 브라우저 것만), 갱신
+사이클 결과 알림(🔔)을 확인할 수 있다.
+
+### 그래프 (`/static/graph.html`)
+
+위키 전체를 노드(항목)·엣지(관계) 그래프로 보여준다. 내용이 비슷한 항목들은
+먼저 하나의 backbone 노드로 묶여 보이고, 클릭하면 그 안의 항목들만 펼쳐진다.
+노드 색으로 상태(active/shadow/deprecated/rejected)를, 엣지로 관계 종류
+(pending_update/superseded_by/similar/cluster_similar)를 구분한다. 좌측에서
+항목을 검색해 바로 포커스할 수 있고, 노드나 엣지를 클릭하면 우측 패널에 상세
+정보가 뜬다. 채팅의 출처 링크로 들어오면 해당 항목이 자동으로 포커스된다.
+
+### 사이클 추이 (`/static/history.html`)
+
+갱신 사이클(`scripts/run_update_cycle.py`)이 돌 때마다 그 시점 위키 상태의
+검색 품질(recall@k/mrr/correctness/escalation_correctness)을 한 행씩 기록한
+표와 그래프. 그 사이클에서 발견된 gap 수, 새로 shadow에 반영된 후보 수, 실제
+승격 여부도 같이 보여줘서 "대화 로그가 위키를 스스로 갱신해 검색 품질이 실제로
+개선되는지"를 여러 사이클에 걸쳐 눈으로 확인할 수 있다.
 
 ## 위키 자가 갱신 직접 확인하기
 
