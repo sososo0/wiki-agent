@@ -60,34 +60,29 @@
     스스로 갱신한다"는 이 프로젝트의 핵심 서사가 실제로 검색 품질을 개선(혹은
     적어도 퇴화시키지 않음)하는지를 여러 사이클에 걸쳐 눈으로 확인할 수 있습니다.
   </p>
-  <button id="legend-toggle" type="button" style="margin-top:8px; border:1px solid #e2e8f0; background:#fff; border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; color:#374151;">ℹ️ 컬럼 설명 보기</button>
-  <p class="term-hint">
+  <p class="term-hint" style="margin-top:8px;">
     공통 용어 — <b>골드셋</b>: 정답이 미리 정해져 있는 평가용 질문 모음(고정된 시험 문제지 같은 것).
     <b>엔트리</b>: 위키 항목 하나(아래 표의 한 행에 대응하는 게 아니라, 위키 안의 지식 단위 하나).
   </p>
+  <button id="legend-toggle" type="button" style="margin-top:8px; border:1px solid #e2e8f0; background:#fff; border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; color:#374151;">ℹ️ 컬럼 설명 보기</button>
   <dl id="column-legend">
     <dt>시각</dt><dd>그 사이클이 실행된 시각.</dd>
     <dt>gap</dt><dd>
-      그 사이클에서 마이닝된(발견된) gap 개수 — 위키가 답을 잘 못 찾는다고 판단된, 반복된 저신뢰 질문 그룹의 수.
-      <br><small class="term-hint">마이닝: 사람이 일일이 찾는 대신, 로그에서 반복되는 패턴을 자동으로 찾아내는 것.</small>
+      그 사이클에서 마이닝된(발견된) gap 개수 — 위키가 답을 잘 못 찾는다고 판단된, 반복된 저신뢰 질문 그룹의 수. <small class="term-hint">마이닝: 사람이 일일이 찾는 대신, 로그에서 반복되는 패턴을 자동으로 찾아내는 것.</small>
     </dd>
     <dt>shadow</dt><dd>그 사이클에서 새로 shadow로 반영된(아직 승격되지 않은) 후보 엔트리 수.</dd>
     <dt>승격</dt><dd>
-      그 사이클 결과로 shadow 후보가 실제로 active로 승격됐는지 — 골드셋 회귀(recall@k/correctness 하락 등)가 감지되면 승격되지 않고 shadow로 남습니다.
-      <br><small class="term-hint">회귀: 새 버전이 기존 버전보다 오히려 성능이 나빠지는 것.</small>
+      그 사이클 결과로 shadow 후보가 실제로 active로 승격됐는지 — 골드셋 회귀(recall@k/correctness 하락 등)가 감지되면 승격되지 않고 shadow로 남습니다. <small class="term-hint">회귀: 새 버전이 기존 버전보다 오히려 성능이 나빠지는 것.</small>
     </dd>
     <dt>recall@k</dt><dd>
-      그 시점의 active 위키로 골드셋 질문들을 검색했을 때, 정답 엔트리가 top-k 결과 안에 포함된 비율(0~1, 높을수록 좋음).
-      <br><small class="term-hint">top-k: 검색했을 때 점수 순으로 상위 k개까지의 결과(예: k=5면 상위 5개).</small>
+      그 시점의 active 위키로 골드셋 질문들을 검색했을 때, 정답 엔트리가 top-k 결과 안에 포함된 비율(0~1, 높을수록 좋음). <small class="term-hint">top-k: 검색했을 때 점수 순으로 상위 k개까지의 결과(예: k=5면 상위 5개).</small>
     </dd>
     <dt>mrr</dt><dd>Mean Reciprocal Rank — 정답이 검색 결과에서 몇 번째 순위로 나왔는지의 평균 역수(1위에 가까울수록 1에 가까움).</dd>
     <dt>correctness</dt><dd>
-      LLM judge가 채점한 답변의 사실적 정확도(0~1, 골드셋의 기준 답변과 비교).
-      <br><small class="term-hint">LLM judge: 사람이 일일이 채점하는 대신, AI 모델에게 답변이 맞는지 판정시키는 방식.</small>
+      LLM judge가 채점한 답변의 사실적 정확도(0~1, 골드셋의 기준 답변과 비교). <small class="term-hint">LLM judge: 사람이 일일이 채점하는 대신, AI 모델에게 답변이 맞는지 판정시키는 방식.</small>
     </dd>
     <dt>escalation</dt><dd>
-      KB가 답을 모르는(unanswerable) 골드셋 질문에 대해 "모른다"고 올바르게 인정한 비율 — 골드셋에 unanswerable 문항이 없으면 "—"로 표시.
-      <br><small class="term-hint">KB: Knowledge Base(지식베이스) — 이 위키 자체를 가리키는 말.</small>
+      KB가 답을 모르는(unanswerable) 골드셋 질문에 대해 "모른다"고 올바르게 인정한 비율 — 골드셋에 unanswerable 문항이 없으면 "—"로 표시. <small class="term-hint">KB: Knowledge Base(지식베이스) — 이 위키 자체를 가리키는 말.</small>
     </dd>
   </dl>
 </div>
