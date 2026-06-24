@@ -70,14 +70,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(demo_app, "generate_title", lambda query, model=None: "stub title")
     monkeypatch.setattr(retrieval, "default_embed_fn", _stub_embed_fn)
     monkeypatch.setattr(retrieval, "default_rerank_fn", _stub_rerank_fn)
-    # 호출 예산/보안 상태는 모두 모듈 전역(dict)이라 테스트 간에 그대로 남으면
-    # 순서/실행 횟수에 따라 한도 초과가 다르게 발생할 수 있다 — 매 테스트 시작
-    # 전 깨끗한 상태로 리셋해 격리한다. TestClient는 매 요청을 같은 고정 IP로
-    # 보내므로(버스트/일일 IP 한도가 공유) 리셋이 없으면 테스트가 누적된 카운트로
-    # 서로 영향을 준다.
-    demo_app._daily_budget.update({"date": None, "count": 0})
-    demo_app._conv_call_counts.clear()
-    demo_app._ip_daily_counts.clear()
+    # LLM 호출 예산(daily/conv/ip_daily)은 이제 매 테스트가 새로 만드는 tmp
+    # DB(llm_call_budget 테이블)에 있어서 자동으로 깨끗하게 시작한다 — 리셋 불필요.
+    # 버스트 리미터/명확화 대기 상태는 여전히 프로세스 메모리 dict라 직접 리셋해야
+    # 한다(TestClient가 매 요청을 같은 고정 IP로 보내므로 안 비우면 테스트끼리
+    # 영향을 준다).
     demo_app._ip_burst_log.clear()
     demo_app._pending_clarifications.clear()
 
@@ -129,23 +126,91 @@ def test_history_unknown_conv_id_returns_empty(client):
 
 
 def test_conversations_lists_past_conversations_with_preview(client):
+    """conv-a/conv-b가 같은 브라우저(같은 owner_token)가 만든 것처럼 동일 토큰을
+    보내야, 그 토큰으로 /conversations를 조회했을 때 둘 다 보여야 한다."""
     client.post("/chat", json={
         "conv_id": "conv-a", "turn_id": 0, "message": "first question in conv-a",
+        "owner_token": "owner-1",
     })
     client.post("/chat", json={
         "conv_id": "conv-b", "turn_id": 0, "message": "first question in conv-b",
+        "owner_token": "owner-1",
     })
     client.post("/chat", json={
         "conv_id": "conv-a", "turn_id": 1, "message": "second question in conv-a",
+        "owner_token": "owner-1",
     })
 
-    resp = client.get("/conversations")
+    resp = client.get("/conversations", params={"owner_token": "owner-1"})
     assert resp.status_code == 200
     convs = {c["conv_id"]: c for c in resp.json()["conversations"]}
     assert convs["conv-a"]["turn_count"] == 2
     assert convs["conv-a"]["first_query"] == "first question in conv-a"
     assert convs["conv-a"]["title"] == "stub title"
     assert convs["conv-b"]["turn_count"] == 1
+
+
+def test_conversations_without_owner_token_returns_empty(client):
+    """owner_token을 안 보내면(fail-closed) 아무 대화도 보이면 안 된다 — 누구
+    것인지 모르는 대화를 아무에게나 보여주지 않기 위함."""
+    client.post("/chat", json={
+        "conv_id": "conv-c", "turn_id": 0, "message": "first question in conv-c",
+        "owner_token": "owner-2",
+    })
+
+    resp = client.get("/conversations")
+    assert resp.status_code == 200
+    assert resp.json() == {"conversations": []}
+
+
+def test_conversations_does_not_leak_other_owners_conversations(client):
+    """owner_token이 다르면 다른 사람의 대화가 안 보여야 한다."""
+    client.post("/chat", json={
+        "conv_id": "conv-mine", "turn_id": 0, "message": "my question",
+        "owner_token": "owner-mine",
+    })
+    client.post("/chat", json={
+        "conv_id": "conv-theirs", "turn_id": 0, "message": "their question",
+        "owner_token": "owner-theirs",
+    })
+
+    resp = client.get("/conversations", params={"owner_token": "owner-mine"})
+    conv_ids = {c["conv_id"] for c in resp.json()["conversations"]}
+    assert conv_ids == {"conv-mine"}
+
+
+def test_history_with_wrong_owner_token_returns_404(client):
+    client.post("/chat", json={
+        "conv_id": "conv-protected", "turn_id": 0, "message": "secret question",
+        "owner_token": "owner-real",
+    })
+
+    resp = client.get("/history/conv-protected", params={"owner_token": "owner-wrong"})
+    assert resp.status_code == 404
+
+
+def test_history_with_correct_owner_token_succeeds(client):
+    client.post("/chat", json={
+        "conv_id": "conv-protected-2", "turn_id": 0, "message": "secret question",
+        "owner_token": "owner-real",
+    })
+
+    resp = client.get("/history/conv-protected-2", params={"owner_token": "owner-real"})
+    assert resp.status_code == 200
+    assert len(resp.json()["turns"]) == 1
+
+
+def test_history_for_legacy_conversation_without_owner_token_still_works(client):
+    """owner_token 없이(레거시) 만들어진 대화는 conv_id를 직접 아는 /history
+    조회는 여전히 허용된다(기존 동작 보존) — owner_token 미스매치 체크는
+    저장된 owner_token이 있을 때만 적용된다."""
+    client.post("/chat", json={
+        "conv_id": "conv-legacy", "turn_id": 0, "message": "legacy question",
+    })
+
+    resp = client.get("/history/conv-legacy", params={"owner_token": "anything-or-nothing"})
+    assert resp.status_code == 200
+    assert len(resp.json()["turns"]) == 1
 
 
 def test_chat_first_turn_sets_conversation_title(client):
@@ -406,6 +471,42 @@ def test_generate_keeps_clarify_type_when_model_gives_no_options(monkeypatch):
     assert result["options"] == []
 
 
+def test_generate_falls_back_to_error_message_when_api_call_raises(monkeypatch):
+    """일시적 네트워크/레이트리밋 오류로 Anthropic 호출 자체가 실패해도, 처리
+    안 된 500이 사용자에게 노출되는 대신 안내 문구로 폴백해야 한다."""
+    class _RaisingMessages:
+        def create(self, **kwargs):
+            raise RuntimeError("simulated API failure")
+
+    class _RaisingClient:
+        messages = _RaisingMessages()
+
+    monkeypatch.setattr(demo_app, "_anthropic_client", lambda: _RaisingClient())
+
+    result = demo_app.generate(
+        "질문", [{"entry_id": "wiki_1", "topic": "t", "canonical": "c"}],
+    )
+
+    assert result["type"] == "answer"
+    assert "오류" in result["answer"]
+    assert result["entry_ids_used"] == ["wiki_1"]
+
+
+def test_generate_title_falls_back_to_truncated_query_when_api_call_raises(monkeypatch):
+    class _RaisingMessages:
+        def create(self, **kwargs):
+            raise RuntimeError("simulated API failure")
+
+    class _RaisingClient:
+        messages = _RaisingMessages()
+
+    monkeypatch.setattr(demo_app, "_anthropic_client", lambda: _RaisingClient())
+
+    title = demo_app.generate_title("아주 긴 질문이라고 가정해보자")
+
+    assert title == "아주 긴 질문이라고 가정해보자"[:40]
+
+
 def test_chat_blocks_llm_call_when_per_ip_daily_budget_exhausted(client, monkeypatch):
     """conv_id를 바꿔도 같은 IP면 IP 일일 한도에 걸려야 한다 — conv_id는
     클라이언트가 임의로 새로 만들 수 있는 값이라, 대화당 한도만으로는
@@ -475,6 +576,28 @@ def test_notifications_endpoint_lists_unread_count(client):
     assert body["notifications"][0]["title"] == "회귀로 승격 차단됨"  # 최신순
 
 
+def test_cycle_history_endpoint_lists_rows_in_chronological_order(client):
+    """cycle_history도 notifications와 같은 이유로 신뢰된 오프라인 스크립트만
+    쓰고 GET /cycle-history는 읽기만 한다 — 단, 추이 차트용이라 최신순이 아니라
+    시간순(ts ASC)으로 나와야 한다."""
+    wiki_store.add_cycle_history(
+        mined=1, shadow_count=1, promoted=False, activated_count=0,
+        recall_at_k=0.5, mrr=0.4, correctness=0.3,
+    )
+    wiki_store.add_cycle_history(
+        mined=2, shadow_count=1, promoted=True, activated_count=1,
+        recall_at_k=0.9, mrr=0.8, correctness=0.7, escalation_correctness=1.0,
+    )
+
+    resp = client.get("/cycle-history")
+    assert resp.status_code == 200
+    cycles = resp.json()["cycles"]
+    assert len(cycles) == 2
+    assert cycles[0]["recall_at_k"] == 0.5  # 시간순 첫 번째
+    assert cycles[1]["promoted"] == 1
+    assert cycles[1]["escalation_correctness"] == 1.0
+
+
 def test_notifications_mark_read_decrements_unread_count(client):
     wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
     notif_id = wiki_store.list_notifications()[0]["id"]
@@ -486,3 +609,38 @@ def test_notifications_mark_read_decrements_unread_count(client):
     body = client.get("/notifications").json()
     assert body["unread_count"] == 0
     assert body["notifications"][0]["read"] == 1
+
+
+def test_notifications_read_blocked_without_admin_token_when_configured(client, monkeypatch):
+    monkeypatch.setattr(demo_app, "ADMIN_TOKEN", "secret")
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    notif_id = wiki_store.list_notifications()[0]["id"]
+
+    resp = client.post(f"/notifications/{notif_id}/read")
+    assert resp.status_code == 403
+    assert wiki_store.list_notifications()[0]["read"] == 0  # 실제로 안 바뀌어야 함
+
+
+def test_notifications_read_allowed_with_correct_admin_token(client, monkeypatch):
+    monkeypatch.setattr(demo_app, "ADMIN_TOKEN", "secret")
+    wiki_store.add_notification("info", "사이클 완료", "gap 0개 발견")
+    notif_id = wiki_store.list_notifications()[0]["id"]
+
+    resp = client.post(
+        f"/notifications/{notif_id}/read", headers={"X-Admin-Token": "secret"})
+    assert resp.status_code == 200
+    assert wiki_store.list_notifications()[0]["read"] == 1
+
+
+def test_consume_call_budget_counters_are_shared_via_db_not_process_memory(client):
+    """daily/conv/ip_daily 카운터가 demo.app 모듈의 in-memory dict가 아니라
+    wiki_store(DB)에 있어야 한다 — 여러 워커 프로세스가 떠도 한도가 공유되는
+    근거. 직접 wiki_store 함수로 조회해 /chat 호출 결과와 일치하는지 확인."""
+    client.post("/chat", json={"conv_id": "conv-budget", "turn_id": 0, "message": "first question"})
+    client.post("/chat", json={"conv_id": "conv-budget", "turn_id": 1, "message": "second question"})
+
+    # turn_id=0은 generate() 1회 + 제목 생성 백그라운드 태스크 1회 = 2건,
+    # turn_id=1은 generate() 1회 -> 합계 3건.
+    assert wiki_store.get_call_budget_counter("conv", "conv-budget") == 3
+    today = time.strftime("%Y-%m-%d")
+    assert wiki_store.get_call_budget_counter("daily", today) >= 3

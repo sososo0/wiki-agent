@@ -74,6 +74,30 @@ def test_agent_generated_with_verified_source_is_allowed_past_step_1():
     assert (ok, reason) == (True, "ok")
 
 
+def test_curated_from_web_without_verified_source_is_blocked():
+    """★ HARD CONSTRAINT 확장: curated_from_web도 agent_generated와 동일한
+    위험군(LLM이 스스로 근거를 댐)이라 미검증 source면 차단되어야 한다."""
+    patch = {**GOOD_PATCH, "provenance": "curated_from_web",
+             "sources": [{"type": "web", "url": "https://example.com", "verified": False}]}
+    ok, reason = gate.passes_gate(
+        patch, today_writes=0, existing_entries=EXISTING_ENTRIES,
+        judge_fn=_stub_judge_high,
+    )
+    assert ok is False
+    assert reason == "curated_from_web requires a verified source"
+
+
+def test_curated_from_web_with_verified_source_is_allowed_past_step_1():
+    patch = {**GOOD_PATCH, "provenance": "curated_from_web",
+             "sources": [{"type": "web", "url": "https://example.com/a", "verified": True},
+                         {"type": "web", "url": "https://example.com/b", "verified": True}]}
+    ok, reason = gate.passes_gate(
+        patch, today_writes=0, existing_entries=EXISTING_ENTRIES,
+        judge_fn=_stub_judge_high,
+    )
+    assert (ok, reason) == (True, "ok")
+
+
 def test_daily_cap_exceeded_is_blocked():
     ok, reason = gate.passes_gate(
         GOOD_PATCH, today_writes=20, existing_entries=EXISTING_ENTRIES,
@@ -99,6 +123,48 @@ def test_near_duplicate_of_existing_entry_is_blocked():
         judge_fn=_stub_judge_high,
     )
     assert (ok, reason) == (False, "near-duplicate of existing entry")
+
+
+def test_near_duplicate_of_pending_shadow_entry_is_blocked():
+    """active 엔트리와는 안 겹쳐도, 이미 쌓인(아직 미승격) shadow 후보와 근접
+    중복이면 막혀야 한다 — 같은 gap이 사이클마다 비슷한 shadow를 계속 쌓는 걸
+    방지(이전엔 existing_entries=active만 봐서 이 경우를 못 잡았다)."""
+    pending_shadow = [
+        {"entry_id": "wiki_gap_other_1", "topic": "Foo bar",
+         "canonical": "Foo bar baz qux."},
+    ]
+    ok, reason = gate.passes_gate(
+        GOOD_PATCH, today_writes=0, existing_entries=EXISTING_ENTRIES,
+        pending_shadow_entries=pending_shadow, judge_fn=_stub_judge_high,
+    )
+    assert (ok, reason) == (False, "near-duplicate of existing entry")
+
+
+def test_pending_shadow_entries_not_passed_to_judge_fn():
+    """judge_fn에는 검증된(active) 엔트리만 보여야 한다 — pending_shadow_entries를
+    judge에 같이 넘기면, 아직 검증 안 된 shadow를 "검증된 엔트리"처럼 보여주는
+    셈이라 gate의 grounding 체크 설계(모순 체크 대상=검증된 지식)가 깨진다."""
+    seen = {}
+
+    def _recording_judge(patch, existing_entries):
+        seen["existing_entries"] = existing_entries
+        return 1.0, "ok"
+
+    pending_shadow = [{"entry_id": "wiki_gap_other_1", "topic": "Unrelated", "canonical": "Unrelated."}]
+    gate.passes_gate(
+        GOOD_PATCH, today_writes=0, existing_entries=EXISTING_ENTRIES,
+        pending_shadow_entries=pending_shadow, judge_fn=_recording_judge,
+    )
+    assert seen["existing_entries"] == EXISTING_ENTRIES
+
+
+def test_pending_shadow_entries_defaults_to_no_extra_dedup_check():
+    """기존 호출부(인자를 안 주는 코드)는 동작이 그대로여야 한다."""
+    ok, reason = gate.passes_gate(
+        GOOD_PATCH, today_writes=0, existing_entries=EXISTING_ENTRIES,
+        judge_fn=_stub_judge_high,
+    )
+    assert (ok, reason) == (True, "ok")
 
 
 def test_failed_grounding_check_is_blocked():

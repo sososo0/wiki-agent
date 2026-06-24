@@ -78,3 +78,38 @@ def test_curate_falls_back_to_advanced_for_missing_or_invalid_tier():
 
     patch2 = curate.curate(GAP, llm_fn=_llm_fn_with_bad_tier)
     assert patch2["tier"] == "advanced"
+
+
+def _stub_web_llm_fn(query_examples):
+    return {
+        "topic": "Cancelling a subscription",
+        "canonical": "Go to account settings and click cancel.",
+        "body_md": "Navigate to Account > Subscription > Cancel.",
+        "tier": "basics",
+        "citations": [
+            {"url": "https://docs.example.com/billing/cancel", "title": "Cancelling your plan"},
+        ],
+    }
+
+
+def test_curate_from_web_produces_verified_web_sources():
+    patch = curate.curate_from_web(GAP, llm_fn=_stub_web_llm_fn)
+    assert patch["provenance"] == "curated_from_web"
+    assert patch["confidence"] == 0.7
+    assert patch["sources"] == [{
+        "type": "web",
+        "url": "https://docs.example.com/billing/cancel",
+        "title": "Cancelling your plan",
+        "verified": True,
+    }]
+
+
+def test_curate_from_web_raises_when_no_citations_found():
+    """검색이 근거를 못 찾으면 거짓 verified source를 만들지 않고 예외를 던져
+    호출부(run_update_cycle.py)가 curate()로 폴백하게 한다."""
+    def _no_citations_llm_fn(qs):
+        return {**_stub_web_llm_fn(qs), "citations": []}
+
+    import pytest
+    with pytest.raises(ValueError):
+        curate.curate_from_web(GAP, llm_fn=_no_citations_llm_fn)

@@ -3,20 +3,16 @@ wiki-agent / core / retrieval.py
 
 FTS5 BM25 키워드 검색에 dense 임베딩 검색 + RRF 융합 + cross-encoder rerank를 더한다.
 core.wiki_store.search_wiki()가 이 모듈을 호출해 최종 랭킹을 만든다 — 랭킹 로직만
-여기 분리하고, DB 접근/로깅은 wiki_store.py가 그대로 담당한다(역할 분리, 순수 함수라
-pytest로 단독 검증 가능).
+분리하고 DB 접근/로깅은 wiki_store.py가 담당한다(순수 함수라 pytest로 단독 검증 가능).
 
 [의존성 추가 이유]
-- sentence-transformers: dense 임베딩 + cross-encoder rerank를 로컬에서 계산.
-  외부 임베딩 API 키/네트워크 비용 없이 검색 경로가 동작해야 MCP 서빙·평가가
-  안정적으로 재현된다. (LLM-as-judge는 eval/run_eval.py 평가에만 쓰이고
-  검색 경로와는 무관)
+- sentence-transformers: dense 임베딩 + cross-encoder rerank를 로컬에서 계산해
+  외부 API 키/네트워크 비용 없이 MCP 서빙·평가가 안정적으로 재현되게 한다.
 - numpy: 코사인 유사도 / RRF 계산.
 
 [임베딩 캐시 없음 — 의도적]
-코퍼스가 작아 매 쿼리 재인코딩 비용이 무시할 수준이고, 무거운 부분(모델 로딩)은
-이미 모듈 싱글톤이라 프로세스당 1회만 발생한다. 코퍼스가 커지면 향후
-pipeline/reindex.py(Step 7)에서 영속 임베딩 저장을 추가한다.
+코퍼스가 작아 매 쿼리 재인코딩 비용이 무시할 수준이고, 모델 로딩은 모듈 싱글톤이라
+프로세스당 1회만 발생한다. 코퍼스가 커지면 영속 임베딩 저장을 추가한다.
 """
 
 import os
@@ -71,9 +67,8 @@ def _entry_vectors(
     entries: List[Dict], embed_fn: Callable, cache: Dict[str, Tuple[Optional[int], np.ndarray]]
 ) -> np.ndarray:
     """entry_id+version으로 캐시 적중하는 엔트리는 재인코딩을 건너뛴다(core/graph.py
-    _get_node_vectors와 동일 패턴). 코퍼스가 커질수록(1000+) 매 쿼리마다 entries
-    전체를 재인코딩하는 비용이 체감 지연이 되므로 도입 — cache를 안 주면(기본 None
-    -> 호출부가 매번 새 dict) 항상 전체 재인코딩해 기존 동작/테스트와 동일하다."""
+    _get_node_vectors와 동일 패턴). cache를 안 주면 항상 전체 재인코딩해 기존
+    동작/테스트와 동일하다."""
     vecs: List[Optional[np.ndarray]] = [None] * len(entries)
     miss_idx: List[int] = []
     miss_texts: List[str] = []
@@ -106,7 +101,7 @@ def _dense_rank(
         return []
     vecs = _entry_vectors(entries, embed_fn, cache if cache is not None else {})
     q_vec = np.asarray(embed_fn([query])[0])
-    sims = vecs @ q_vec  # normalize_embeddings=True 이므로 내적 = 코사인 유사도
+    sims = vecs @ q_vec  # normalize_embeddings=True라 내적 = 코사인 유사도
     order = np.argsort(-sims)
     return [entries[i]["entry_id"] for i in order]
 
@@ -135,10 +130,9 @@ def hybrid_search(
     """BM25 + dense 랭킹을 RRF로 합치고 cross-encoder로 재정렬해 상위 k개를 반환.
 
     반환 shape은 search_wiki()와 동일: entry_id/topic/canonical/score/confidence.
-    embed_fn/rerank_fn을 주입하면(테스트용) 실제 모델을 로딩하지 않고 검증 가능.
-    cache를 주면(entry_id+version 키) 호출부가 들고 있는 동안 콘텐츠가 안 바뀐
-    엔트리는 재인코딩을 건너뛴다 — 안 주면(기본값) 매 호출 전체 재인코딩이라
-    기존 동작과 동일(테스트 격리에 영향 없음, core/graph.py와 동일 패턴).
+    embed_fn/rerank_fn을 주입하면(테스트용) 실제 모델 로딩 없이 검증 가능.
+    cache를 주면(entry_id+version 키) 콘텐츠가 안 바뀐 엔트리는 재인코딩을
+    건너뛴다 — 안 주면 매 호출 전체 재인코딩이라 기존 동작과 동일.
     """
     embed_fn = embed_fn or default_embed_fn
     rerank_fn = rerank_fn or default_rerank_fn

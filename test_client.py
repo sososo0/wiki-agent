@@ -23,7 +23,7 @@ if os.path.exists(DB):
 wiki_store.init_db(seed=True)
 print("DB initialized + seeded.\n")
 
-# 1) MCP search_wiki 도구가 호출할 함수와 동일한 경로를 직접 호출
+# MCP search_wiki 도구가 호출할 함수와 동일한 경로를 직접 호출
 queries = [
     "how to retry transient failures",
     "protect database from too many connections",
@@ -35,12 +35,12 @@ for q in queries:
     print(f"Q: {q}\n   top={top}  " +
           ", ".join(f"{h['entry_id']}:{h['score']}" for h in hits))
 
-# 2) 대화 턴 + 피드백 로깅 (서빙 경로 시뮬레이션)
+# 대화 턴 + 피드백 로깅 (서빙 경로 시뮬레이션)
 wiki_store.log_turn("c_1", 1, queries[0], "Use exponential backoff...",
                     ["wiki_0001"], escalated=False)
 wiki_store.submit_feedback("c_1", 1, "up")
 
-# 3) 적재 확인 — 이 로그가 이후 피드백 파이프라인의 입력이 된다
+# 이 로그가 이후 피드백 파이프라인의 입력이 된다
 conn = wiki_store._conn()
 print("\n-- logged --")
 print("retrieval_log   :", conn.execute("SELECT COUNT(*) FROM retrieval_log").fetchone()[0])

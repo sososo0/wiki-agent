@@ -4,4 +4,8 @@ __pycache__/
 .pytest_cache/
 *.db
 *.db.backup-*
+*.db-shm
+*.db-wal
 logs/
+# 로컬 Docker 배포의 바인드 마운트 볼륨(실행 중 DB/백업 등 런타임 데이터) — 소스 아님.
+/docker-data/

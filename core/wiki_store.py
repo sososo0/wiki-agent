@@ -15,12 +15,16 @@ import re
 import json
 import time
 import sqlite3
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+
+import numpy as np
 
 try:
     from core import retrieval
+    from core.lru_cache import LRUCache
 except ImportError:        # python core/wiki_store.py 로 직접 실행할 때
     import retrieval
+    from lru_cache import LRUCache
 
 DB_PATH = os.environ.get("WIKI_AGENT_DB", "wiki_agent.db")
 
@@ -30,7 +34,7 @@ CREATE TABLE IF NOT EXISTS wiki_entry (
   topic       TEXT NOT NULL,
   canonical   TEXT NOT NULL,
   body_md     TEXT,
-  provenance  TEXT DEFAULT 'doc_verified',   -- doc_verified | curated_from_logs | agent_generated
+  provenance  TEXT DEFAULT 'doc_verified',   -- doc_verified | curated_from_logs | curated_from_web | agent_generated
   confidence  REAL DEFAULT 1.0,
   version     INTEGER DEFAULT 1,
   status      TEXT DEFAULT 'active',          -- active | shadow | deprecated
@@ -63,16 +67,18 @@ CREATE TABLE IF NOT EXISTS feedback (
   conv_id TEXT, turn_id INTEGER, thumb TEXT, reason TEXT DEFAULT NULL, ts REAL
 );
 
--- 대화별 표시용 제목(첫 턴에 1회 생성). conversation_log의 원본 질문/답변과는
--- 별개로, "이전 대화" 목록 UI가 매번 다시 요약하지 않도록 캐시해 둔다.
+-- 대화별 표시용 제목(첫 턴 1회 생성, "이전 대화" UI가 매번 재요약하지 않도록 캐시).
+-- owner_token: 브라우저(localStorage)당 발급되는 토큰 — /conversations·/history/{conv_id}가
+-- 다른 사용자의 대화를 보여주지 않게 범위를 제한한다(ensure_conversation_owner 참고).
+-- 토큰 없는(이 기능 이전) 대화는 NULL로 남아 /conversations 목록엔 안 뜨지만 /history 직접
+-- 조회는 허용한다.
 CREATE TABLE IF NOT EXISTS conversation_meta (
-  conv_id TEXT PRIMARY KEY, title TEXT, created_at REAL
+  conv_id TEXT PRIMARY KEY, title TEXT, created_at REAL, owner_token TEXT DEFAULT NULL
 );
 
--- 갱신 사이클(scripts/run_update_cycle.py) 결과 알림. KB(wiki_entry)가 아니라
--- 운영 알리미 데이터라 HARD CONSTRAINT(에이전트는 KB에 직접 못 씀)와 무관하다 —
--- 쓰기는 오직 신뢰된 오프라인 스크립트에서만 일어나고, 데모 서빙 경로(/chat)는
--- 절대 쓰지 않는다.
+-- 갱신 사이클(scripts/run_update_cycle.py) 결과 알림. KB가 아닌 운영 알리미 데이터라
+-- HARD CONSTRAINT(에이전트는 KB에 직접 못 씀)와 무관 — 쓰기는 신뢰된 오프라인 스크립트
+-- 에서만, 데모 서빙 경로(/chat)는 절대 쓰지 않는다.
 CREATE TABLE IF NOT EXISTS notifications (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   level       TEXT NOT NULL,        -- info | warning | error
@@ -81,6 +87,72 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at  REAL,
   read        INTEGER DEFAULT 0
 );
+
+-- 사이클(scripts/run_update_cycle.py)마다 1행 — promote_if_better()가 본 골드셋 지표를
+-- 시계열로 쌓아 위키 품질 추이를 보여준다. notifications와 같은 이유로 KB와 무관.
+CREATE TABLE IF NOT EXISTS cycle_history (
+  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                      REAL NOT NULL,
+  mined                   INTEGER,
+  shadow_count            INTEGER,
+  promoted                INTEGER,   -- 0 | 1
+  activated_count         INTEGER,
+  recall_at_k             REAL,
+  mrr                     REAL,
+  correctness             REAL,
+  escalation_correctness  REAL,      -- NULL 가능(골드셋에 unanswerable 문항이 없으면)
+  -- 아래 3개는 --check-agentic-regression(옵트인, 기본 off)일 때만 채워짐, 안 쓰면 NULL.
+  -- 알림 전용 비교 신호일 뿐 승격 게이트와는 무관(agentic_eval.py는 그 경로에 연결 안 함).
+  agentic_task_success_rate REAL,
+  agentic_multihop_recall   REAL,
+  agentic_avg_tool_calls    REAL
+);
+
+-- 그래프 화면(/static/graph.html) 표시용 파생 캐시일 뿐 — 검색/평가는 이 테이블을
+-- 안 보고(원본 topic/canonical/body_md는 영어로 남음). entry_id+version 키라
+-- 콘텐츠가 실제로 바뀔 때만 무효화(core/graph.py 임베딩 캐시와 동일 철학). 쓰기는
+-- scripts/translate_wiki_labels.py(신뢰된 오프라인 스크립트)에서만.
+CREATE TABLE IF NOT EXISTS translation_cache (
+  entry_id   TEXT NOT NULL,
+  lang       TEXT NOT NULL DEFAULT 'ko',
+  version    INTEGER NOT NULL,
+  topic      TEXT,
+  canonical  TEXT,
+  body_md    TEXT,
+  updated_at REAL,
+  PRIMARY KEY (entry_id, lang)
+);
+
+-- core/retrieval.py·core/graph.py가 매번 다시 인코딩하던 dense 임베딩을 영속화
+-- (PersistentEmbeddingCache가 읽고/쓴다). entry_id만 PK — model이 바뀌면
+-- get_embedding이 불일치를 캐시미스로 취급해 자연스럽게 새 벡터로 덮어쓴다.
+CREATE TABLE IF NOT EXISTS wiki_embedding (
+  entry_id   TEXT PRIMARY KEY,
+  model      TEXT NOT NULL,
+  version    INTEGER NOT NULL,
+  vector     BLOB NOT NULL,
+  updated_at REAL
+);
+
+-- demo/app.py의 LLM 호출 예산(_consume_call_budget)을 DB에 적재 — 여러 워커
+-- 프로세스로 띄우면(uvicorn --workers N) in-memory 카운터는 워커마다 따로 생겨
+-- 한도가 N배가 되는데, 공유 테이블이라 그 문제가 없다. scope: "daily"(key=날짜,
+-- 프로세스 전체 한도) | "conv"(key=conv_id) | "ip_daily"(key="{ip}:{날짜}").
+-- 버스트 리미터(_ip_burst_log)는 일부러 제외 — 모든 요청마다 도는 미들웨어라
+-- DB에 쓰면 SQLite 쓰기 경합을 다시 늘리는 역효과가 난다.
+CREATE TABLE IF NOT EXISTS llm_call_budget (
+  scope TEXT NOT NULL,
+  key   TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, key)
+);
+
+-- wiki_entry는 status로(거의 모든 list_*), retrieval_log/feedback은 ts로(--window-days
+-- 윈도잉) 매번 필터링되는데 인덱스가 없으면 풀스캔이다. CREATE INDEX는 멱등적이라
+-- 기존 DB에도 안전하게 추가된다.
+CREATE INDEX IF NOT EXISTS idx_wiki_entry_status_updated_at ON wiki_entry(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_retrieval_log_ts ON retrieval_log(ts);
+CREATE INDEX IF NOT EXISTS idx_feedback_ts ON feedback(ts);
 """
 
 SEED_ENTRIES = [
@@ -113,7 +185,9 @@ SEED_ENTRIES = [
 
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    # busy_timeout(5000ms) — 동시 쓰기가 겹쳐도 즉시 "database is locked"로 죽는
+    # 대신 5초 재시도한다. 매 호출마다 새 커넥션을 여는 구조라 매번 지정 필요.
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -128,10 +202,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     feedback_cols = {row["name"] for row in conn.execute("PRAGMA table_info(feedback)")}
     if "reason" not in feedback_cols:
         conn.execute("ALTER TABLE feedback ADD COLUMN reason TEXT DEFAULT NULL")
+    cycle_history_cols = {row["name"] for row in conn.execute("PRAGMA table_info(cycle_history)")}
+    for col in ("agentic_task_success_rate", "agentic_multihop_recall", "agentic_avg_tool_calls"):
+        if col not in cycle_history_cols:
+            conn.execute(f"ALTER TABLE cycle_history ADD COLUMN {col} REAL DEFAULT NULL")
+    conv_meta_cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversation_meta)")}
+    if "owner_token" not in conv_meta_cols:
+        conn.execute("ALTER TABLE conversation_meta ADD COLUMN owner_token TEXT DEFAULT NULL")
 
 
 def init_db(seed: bool = True) -> None:
     conn = _conn()
+    # WAL은 DB 파일에 영구 저장되는 설정이라 프로세스 시작 시 1회면 충분(매 _conn()
+    # 호출마다 안 해도 됨) — 쓰기 도중에도 읽기가 안 막히게 해서(쓰기끼리는 여전히
+    # 1개만, SQLite 근본 한계) 동시 접근 시 락 경합을 크게 줄인다.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     _migrate_schema(conn)
     if seed and conn.execute("SELECT COUNT(*) FROM wiki_entry").fetchone()[0] == 0:
@@ -145,11 +230,10 @@ def init_db(seed: bool = True) -> None:
 def add_entry(entry_id, topic, canonical, body_md, *, conn=None,
               status="shadow", provenance="curated_from_logs",
               confidence=1.0, sources=None, supersedes=None, tier=None) -> None:
-    """엔트리 추가/교체. (MCP로는 노출하지 않는다 — 에이전트가 KB에 직접 쓰지 못하게.)
+    """엔트리 추가/교체. MCP로는 노출하지 않는다 — 에이전트가 KB에 직접 쓰지 못하게.
 
-    tier: basics | intermediate | advanced | None(미분류). 호출부(curate.py가
-    문서 파일명 또는 LLM 분류로 결정)가 넘기지 않으면 NULL로 남아 기존 동작과
-    동일 — 이 컬럼이 없던 시절 만들어진 엔트리도 그대로 호환."""
+    tier: basics | intermediate | advanced | None(미분류). 호출부(curate.py)가
+    안 넘기면 NULL로 남아, 이 컬럼이 없던 시절 엔트리도 그대로 호환."""
     own = conn is None
     conn = conn or _conn()
     conn.execute(
@@ -185,9 +269,8 @@ def _fts_query(q: str) -> str:
 def list_active_entries() -> List[Dict[str, Any]]:
     """status='active' 엔트리 전체를 반환 (하이브리드 검색의 dense 랭킹 입력).
 
-    sources도 포함한다 — 문서 ingestion의 dedupe(core/pipeline/dedupe.py)가
-    이미 active로 승격된 엔트리의 chunk_hash를 비교해 콘텐츠 변경 여부를
-    판단해야 하기 때문(검색 경로 자체는 sources를 쓰지 않으므로 영향 없음)."""
+    sources도 포함 — dedupe(core/pipeline/dedupe.py)가 chunk_hash 비교로 콘텐츠
+    변경 여부를 판단해야 하기 때문(검색 경로 자체는 sources를 안 씀)."""
     conn = _conn()
     rows = conn.execute(
         """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
@@ -198,6 +281,21 @@ def list_active_entries() -> List[Dict[str, Any]]:
         {**dict(r), "sources": json.loads(r["sources"]) if r["sources"] else []}
         for r in rows
     ]
+
+
+def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
+    """status 무관하게 entry_id 하나를 조회. core/pipeline/reindex.py가 막 쓰여진
+    엔트리(아직 shadow일 수 있음)의 현재 version/텍스트를 읽어 임베딩을 영속화
+    하는 데 쓴다 — list_active_entries 등은 status로 필터링해 이 용도에 안 맞음."""
+    conn = _conn()
+    row = conn.execute(
+        """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
+                  version, sources, tier, status
+           FROM wiki_entry WHERE entry_id = ?""", (entry_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {**dict(row), "sources": json.loads(row["sources"]) if row["sources"] else []}
 
 
 def _bm25_rank(query: str, limit: int) -> List[str]:
@@ -218,11 +316,9 @@ def _bm25_rank(query: str, limit: int) -> List[str]:
 def search_wiki(query: str, k: int = 5, *, cache: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     """BM25 + dense + RRF + rerank 하이브리드 검색 후 결과를 반환하고 retrieval_log에 적재.
 
-    cache를 안 주면(기본값) 매 호출 새 dict로 항상 전체 재인코딩 — 기존 동작/테스트와
-    동일(서로 다른 embed_fn을 쓰는 테스트들이 같은 entry_id+version을 캐시 충돌
-    없이 공유할 수 있어야 함). 오래 사는 프로세스(데모 서버 등)는 자신이 들고 있는
-    dict를 넘겨 코퍼스가 커져도 매 쿼리 재인코딩 비용이 늘지 않게 한다(core/retrieval.py
-    hybrid_search의 cache 인자, core/graph.py와 동일 패턴)."""
+    cache를 안 주면(기본값) 매 호출 새 dict로 전체 재인코딩 — 서로 다른 embed_fn을
+    쓰는 테스트들이 캐시 충돌 없이 공유할 수 있어야 하기 때문. 오래 사는 프로세스는
+    자신의 dict를 넘겨 코퍼스가 커져도 재인코딩 비용이 안 늘게 한다."""
     fetch_k = max(k * 4, 20)
     bm25_ids = _bm25_rank(query, fetch_k)
     entries = list_active_entries()
@@ -243,10 +339,9 @@ def search_wiki(query: str, k: int = 5, *, cache: Dict[str, Any] = None) -> List
 
 def list_retrieval_log(since_ts: float = None) -> List[Dict[str, Any]]:
     """retrieval_log를 반환(피드백 파이프라인의 gap 마이닝 입력). since_ts를 주면
-    그 이후 행만 반환 — 안 주면(기본값) 기존 동작과 동일하게 테이블 전체를 반환한다.
-    윈도잉 없이 전체를 매 사이클 다시 마이닝하면 테이블이 무한히 쌓이는 동안 스캔
-    비용도 계속 커지고, 한번 오염된(예: 평가 질문이 우연히 3번 이상 반복된) 쿼리가
-    영원히 gap으로 재탐지된다 — scripts/run_update_cycle.py가 --window-days로 호출."""
+    그 이후 행만 반환 — 안 주면 테이블 전체. 윈도잉 없이 매 사이클 전체를 다시
+    마이닝하면 스캔 비용이 계속 커지고, 한번 오염된 쿼리가 영원히 gap으로 재탐지
+    된다 — scripts/run_update_cycle.py가 --window-days로 호출."""
     conn = _conn()
     if since_ts is None:
         rows = conn.execute("SELECT id, query, retrieved, ts FROM retrieval_log").fetchall()
@@ -275,6 +370,35 @@ def list_feedback(since_ts: float = None) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def purge_old_logs(retention_days: float = 30) -> Dict[str, int]:
+    """retrieval_log/feedback에서 retention_days보다 오래된 행을 지운다. --window-days
+    (mine_gaps가 보는 범위)는 읽기 필터일 뿐 삭제하지 않으므로 두 테이블은 영원히
+    자란다 — 이 함수가 retention을 실제로 집행(scripts/purge_old_logs.py가 호출).
+
+    conversation_log는 의도적으로 제외 — 사용자 대화 기록이라 마이닝 입력 로그와는
+    보존 정책이 달라야 한다고 판단."""
+    cutoff = time.time() - retention_days * 86400
+    conn = _conn()
+    retrieval_deleted = conn.execute(
+        "DELETE FROM retrieval_log WHERE ts < ?", (cutoff,)).rowcount
+    feedback_deleted = conn.execute(
+        "DELETE FROM feedback WHERE ts < ?", (cutoff,)).rowcount
+    conn.commit()
+    conn.close()
+    return {"retrieval_log_deleted": retrieval_deleted, "feedback_deleted": feedback_deleted}
+
+
+def backup_db(dest_path: str) -> None:
+    """SQLite Online Backup API로 현재 DB를 dest_path에 통째로 복제한다. 단순 파일
+    복사(cp)는 WAL 모드에서 최근 커밋이 -wal 파일에만 있어 일관성이 깨질 수 있는데,
+    backup()은 그런 경우에도 일관된 스냅샷을 보장한다."""
+    conn = _conn()
+    dest = sqlite3.connect(dest_path)
+    conn.backup(dest)
+    dest.close()
+    conn.close()
+
+
 def list_shadow_entries() -> List[Dict[str, Any]]:
     """status='shadow' 엔트리 전체를 반환 (promote 단계의 승격/병합 입력)."""
     conn = _conn()
@@ -290,10 +414,9 @@ def list_shadow_entries() -> List[Dict[str, Any]]:
 
 
 def list_rejected_entries() -> List[Dict[str, Any]]:
-    """status='rejected' 엔트리 전체를 반환. 문서 ingestion이 게이트 거부를
-    chunk_hash 단위로 기억해(core/pipeline/dedupe.rejected_entry_id) 같은
-    콘텐츠를 재실행마다 다시 LLM 큐레이션/judge에 돌리지 않게 하는 입력 —
-    이 status는 active/shadow 어느 쪽에도 안 잡혀 검색·승격에 영향 없다."""
+    """status='rejected' 엔트리 전체를 반환. 게이트 거부를 chunk_hash 단위로 기억해
+    (core/pipeline/dedupe.rejected_entry_id) 같은 콘텐츠를 재실행마다 다시 LLM
+    큐레이션/judge에 돌리지 않게 한다 — active/shadow와 무관해 검색·승격에 영향 없음."""
     conn = _conn()
     rows = conn.execute(
         """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
@@ -308,9 +431,8 @@ def list_rejected_entries() -> List[Dict[str, Any]]:
 
 def list_deprecated_entries() -> List[Dict[str, Any]]:
     """status='deprecated' 엔트리 전체를 반환. promote.py가 shadow를 승격시키며
-    supersedes 대상이 있던 shadow 자신의 entry_id를 이 status로 강등시킨다
-    (promote.py:138-139) — supersedes 컬럼은 강등 후에도 그대로 남아 있어
-    "과거에 어떤 active 엔트리를 대체하려 했는지" 이력으로 읽을 수 있다."""
+    supersedes 대상이 있던 shadow 자신을 이 status로 강등한다 — supersedes 컬럼은
+    강등 후에도 남아 "과거에 어떤 active 엔트리를 대체하려 했는지" 이력이 된다."""
     conn = _conn()
     rows = conn.execute(
         """SELECT entry_id, topic, canonical, body_md, provenance, confidence,
@@ -345,6 +467,109 @@ def set_entry_status(entry_id: str, status: str) -> None:
     conn.close()
 
 
+def get_translations(entry_ids: List[str], lang: str = "ko") -> Dict[str, Dict[str, Any]]:
+    """그래프 화면 표시용 번역 캐시 조회. 호출부(core/graph.py)가 version을 노드의
+    현재 version과 비교해 콘텐츠가 바뀌었으면 무시하고 영어로 폴백한다."""
+    if not entry_ids:
+        return {}
+    conn = _conn()
+    placeholders = ",".join("?" * len(entry_ids))
+    rows = conn.execute(
+        f"""SELECT entry_id, version, topic, canonical, body_md
+            FROM translation_cache WHERE lang = ? AND entry_id IN ({placeholders})""",
+        (lang, *entry_ids)).fetchall()
+    conn.close()
+    return {r["entry_id"]: dict(r) for r in rows}
+
+
+def set_translation(entry_id, version, topic, canonical, body_md, *,
+                     lang="ko", conn=None) -> None:
+    """번역 캐시 upsert(entry_id+lang 키). scripts/translate_wiki_labels.py
+    (신뢰된 오프라인 스크립트)에서만 호출 — 데모 서빙 경로는 절대 안 씀."""
+    own = conn is None
+    conn = conn or _conn()
+    conn.execute(
+        """INSERT INTO translation_cache
+           (entry_id, lang, version, topic, canonical, body_md, updated_at)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(entry_id, lang) DO UPDATE SET
+             version=excluded.version, topic=excluded.topic,
+             canonical=excluded.canonical, body_md=excluded.body_md,
+             updated_at=excluded.updated_at""",
+        (entry_id, lang, version, topic, canonical, body_md, time.time()))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+def get_embedding(entry_id: str, *, model: str = None) -> Optional[Tuple[int, np.ndarray]]:
+    """영속화된 (version, vector)를 반환. model이 현재 설정과 다른 행은 None(미스로
+    취급) — 옛 모델 벡터를 쓰면 안 되므로 없던 것처럼 동작해 재인코딩을 유도한다."""
+    model = model or retrieval.EMBED_MODEL
+    conn = _conn()
+    row = conn.execute(
+        "SELECT model, version, vector FROM wiki_embedding WHERE entry_id = ?",
+        (entry_id,)).fetchone()
+    conn.close()
+    if row is None or row["model"] != model:
+        return None
+    vector = np.frombuffer(row["vector"], dtype=np.float32).copy()
+    return row["version"], vector
+
+
+def set_embedding(entry_id: str, version: int, vector: np.ndarray, *,
+                   model: str = None, conn=None) -> None:
+    """임베딩 캐시 upsert(entry_id 키). vector는 float32 bytes로 직렬화해 저장."""
+    model = model or retrieval.EMBED_MODEL
+    own = conn is None
+    conn = conn or _conn()
+    blob = np.asarray(vector, dtype=np.float32).tobytes()
+    conn.execute(
+        """INSERT INTO wiki_embedding (entry_id, model, version, vector, updated_at)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(entry_id) DO UPDATE SET
+             model=excluded.model, version=excluded.version,
+             vector=excluded.vector, updated_at=excluded.updated_at""",
+        (entry_id, model, version, blob, time.time()))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+class PersistentEmbeddingCache:
+    """core/lru_cache.LRUCache와 동일한 get()/__setitem__ 계약을 만족하는 드롭인
+    대체물 — core/retrieval.py·core/graph.py는 무수정으로 받아 쓸 수 있다.
+
+    메모리(LRUCache) 미스 시 DB(wiki_embedding)를 먼저 보고, 거기도 없을 때만
+    embed_fn으로 재인코딩한다. 프로세스 재시작이나 다른 프로세스가 같은 DB를
+    봐도 한 번 인코딩된 엔트리는 재인코딩하지 않는다."""
+
+    def __init__(self, maxsize: int = 2000, model: str = None):
+        self._mem = LRUCache(maxsize=maxsize)
+        self.model = model or retrieval.EMBED_MODEL
+
+    def get(self, key, default=None):
+        hit = self._mem.get(key)
+        if hit is not None:
+            return hit
+        row = get_embedding(key, model=self.model)
+        if row is None:
+            return default
+        self._mem[key] = row
+        return row
+
+    def __setitem__(self, key, value):
+        self._mem[key] = value
+        version, vector = value
+        set_embedding(key, version, vector, model=self.model)
+
+    def __len__(self):
+        return len(self._mem)
+
+    def __contains__(self, key):
+        return key in self._mem
+
+
 def log_turn(conv_id, turn_id, query, answer, retrieved_ids, escalated=False):
     conn = _conn()
     conn.execute(
@@ -359,9 +584,7 @@ def log_turn(conv_id, turn_id, query, answer, retrieved_ids, escalated=False):
 
 def list_conversation(conv_id: str) -> List[Dict[str, Any]]:
     """conv_id의 대화 턴 전체를 turn_id 순으로 반환(읽기 전용). 데모 채팅 UI가
-    새로고침 후에도 conversation_log에 이미 쌓인 로그를 그대로 복원해 보여줄 수
-    있게 한다 — log_turn이 매 턴 적재하는 데이터를 그대로 노출만 할 뿐 새 쓰기
-    경로는 아니다."""
+    새로고침 후에도 기존 로그를 복원해 보여줄 수 있게 한다."""
     conn = _conn()
     rows = conn.execute(
         """SELECT turn_id, query, answer, retrieved, escalated, ts
@@ -375,12 +598,17 @@ def list_conversation(conv_id: str) -> List[Dict[str, Any]]:
     ]
 
 
-def list_conversations(limit: int = 50) -> List[Dict[str, Any]]:
-    """대화(conv_id) 단위로 묶어 최근 활동 순으로 반환(읽기 전용). 데모 채팅 UI가
-    "이전 대화" 목록을 보여줄 수 있게 한다 — conv_id별 첫 질문(미리보기)·제목·턴 수·
-    마지막 활동 시각만 집계할 뿐 conversation_log에 새로 쓰지 않는다. title은
-    conversation_meta에 캐시된 값이 있으면 그걸 쓰고(set_conversation_title),
-    없으면(과거 대화 등) 프론트엔드가 first_query로 대체해 표시한다."""
+def list_conversations(limit: int = 50, *, owner_token: str = None) -> List[Dict[str, Any]]:
+    """대화(conv_id) 단위로 묶어 최근 활동 순으로 반환(읽기 전용) — "이전 대화" 목록
+    UI용. title은 conversation_meta 캐시값이 있으면 쓰고, 없으면(과거 대화 등)
+    프론트엔드가 first_query로 대체 표시한다.
+
+    owner_token이 없으면 빈 리스트를 반환한다(fail-closed) — 누구 것인지 모르는
+    대화를 아무에게나 보여주지 않기 위함. owner_token이 NULL인(이 기능 이전)
+    대화는 어떤 토큰을 보내도 안 뜬다(LEFT JOIN의 WHERE m.owner_token = ?는
+    NULL과 절대 같지 않으므로 자동 제외)."""
+    if not owner_token:
+        return []
     conn = _conn()
     rows = conn.execute(
         """SELECT c.conv_id, COUNT(*) AS turn_count, MAX(c.ts) AS last_ts,
@@ -389,17 +617,18 @@ def list_conversations(limit: int = 50) -> List[Dict[str, Any]]:
                   m.title AS title
            FROM conversation_log c
            LEFT JOIN conversation_meta m ON m.conv_id = c.conv_id
+           WHERE m.owner_token = ?
            GROUP BY c.conv_id
            ORDER BY last_ts DESC
            LIMIT ?""",
-        (limit,)).fetchall()
+        (owner_token, limit)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def set_conversation_title(conv_id: str, title: str) -> None:
-    """대화 제목 캐시(최초 1회, demo/app.py가 첫 턴에만 호출). conversation_log
-    행 자체는 건드리지 않는 별도 메타데이터라 채팅 로그 스키마와 독립적이다."""
+    """대화 제목 캐시(최초 1회, demo/app.py가 첫 턴에만 호출). conversation_log와는
+    독립적인 별도 메타데이터."""
     conn = _conn()
     conn.execute(
         """INSERT INTO conversation_meta (conv_id, title, created_at) VALUES (?,?,?)
@@ -407,6 +636,29 @@ def set_conversation_title(conv_id: str, title: str) -> None:
         (conv_id, title, time.time()))
     conn.commit()
     conn.close()
+
+
+def ensure_conversation_owner(conv_id: str, owner_token: str) -> None:
+    """conv_id의 owner_token을 처음 한 번만 기록한다 — 이미 있으면 덮어쓰지 않는다
+    (다른 토큰이 나중에 소유권을 가로채지 못하게). 매 턴 호출해도 안전(멱등)."""
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO conversation_meta (conv_id, owner_token, created_at) VALUES (?,?,?)
+           ON CONFLICT(conv_id) DO UPDATE SET
+             owner_token = COALESCE(conversation_meta.owner_token, excluded.owner_token)""",
+        (conv_id, owner_token, time.time()))
+    conn.commit()
+    conn.close()
+
+
+def get_conversation_owner_token(conv_id: str) -> Optional[str]:
+    """conv_id에 기록된 owner_token(없으면 None — 레거시 대화). /history/{conv_id}가
+    요청자의 owner_token과 비교해 다른 사용자의 대화를 막는 데 쓴다."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT owner_token FROM conversation_meta WHERE conv_id = ?", (conv_id,)).fetchone()
+    conn.close()
+    return row["owner_token"] if row else None
 
 
 def submit_feedback(conv_id, turn_id, thumb, reason=None):
@@ -420,11 +672,34 @@ def submit_feedback(conv_id, turn_id, thumb, reason=None):
     conn.close()
 
 
+def increment_call_budget_counter(scope: str, key: str) -> int:
+    """scope+key 카운터를 1 증가시키고 새 값을 반환한다. 여러 워커 프로세스가
+    같은 DB를 보므로 프로세스 수와 무관하게 공유 카운트가 유지된다."""
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO llm_call_budget (scope, key, count) VALUES (?,?,1)
+           ON CONFLICT(scope, key) DO UPDATE SET count = count + 1""",
+        (scope, key))
+    row = conn.execute(
+        "SELECT count FROM llm_call_budget WHERE scope = ? AND key = ?", (scope, key)).fetchone()
+    conn.commit()
+    conn.close()
+    return row["count"]
+
+
+def get_call_budget_counter(scope: str, key: str) -> int:
+    """현재 카운트(없으면 0) — increment 전에 한도 초과 여부를 먼저 확인하는 데 쓴다."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT count FROM llm_call_budget WHERE scope = ? AND key = ?", (scope, key)).fetchone()
+    conn.close()
+    return row["count"] if row else 0
+
+
 def add_notification(level: str, title: str, message: str, *, conn=None) -> None:
-    """갱신 사이클(scripts/run_update_cycle.py) 결과 알림 1건 추가. level은
-    info|warning|error — 호출부가 의미를 정하고 여기서는 검증하지 않는다(그
-    판정 로직은 run_update_cycle.py에 둬서 LLM 없이 단위 테스트하기 쉽게 함).
-    데모의 종모양 알림 UI(GET /notifications)가 이걸 읽는다."""
+    """갱신 사이클 결과 알림 1건 추가. level은 info|warning|error — 호출부가 의미를
+    정하고 여기서는 검증하지 않는다. 데모의 종모양 알림 UI(GET /notifications)가
+    이걸 읽는다."""
     own = conn is None
     conn = conn or _conn()
     conn.execute(
@@ -462,8 +737,51 @@ def mark_notification_read(notification_id: int) -> None:
     conn.close()
 
 
+def add_cycle_history(
+    mined: int, shadow_count: int, promoted: bool, activated_count: int,
+    recall_at_k: float, mrr: float, correctness: float,
+    escalation_correctness: float = None, *, conn=None,
+    agentic_task_success_rate: float = None,
+    agentic_multihop_recall: float = None,
+    agentic_avg_tool_calls: float = None,
+) -> None:
+    """갱신 사이클 1회 실행 후의 골드셋 지표 1행을 기록 — promoted면 candidate(새로
+    active가 된 상태), 아니면 base(현재 active 상태)의 지표(호출부 책임). 데모의
+    "사이클 추이" 페이지(GET /cycle-history)가 시계열로 보여줌.
+
+    agentic_* 3개는 --check-agentic-regression(옵트인, 기본 off)일 때만 채워짐."""
+    own = conn is None
+    conn = conn or _conn()
+    conn.execute(
+        """INSERT INTO cycle_history
+           (ts, mined, shadow_count, promoted, activated_count,
+            recall_at_k, mrr, correctness, escalation_correctness,
+            agentic_task_success_rate, agentic_multihop_recall, agentic_avg_tool_calls)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (time.time(), mined, shadow_count, int(promoted), activated_count,
+         recall_at_k, mrr, correctness, escalation_correctness,
+         agentic_task_success_rate, agentic_multihop_recall, agentic_avg_tool_calls))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+def list_cycle_history(limit: int = 100) -> List[Dict[str, Any]]:
+    """시간순(ts ASC)으로 반환 — list_notifications()는 최신순 피드용이라 DESC인
+    것과 의도적으로 다름. 추이 차트는 과거->현재 순서로 그려야 자연스럽다."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT id, ts, mined, shadow_count, promoted, activated_count,
+                  recall_at_k, mrr, correctness, escalation_correctness,
+                  agentic_task_success_rate, agentic_multihop_recall, agentic_avg_tool_calls
+           FROM cycle_history ORDER BY ts ASC LIMIT ?""",
+        (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 if __name__ == "__main__":
-    # 단독 실행: 초기화 + 시드 + 샘플 검색으로 동작 확인
+    # 초기화 + 시드 + 샘플 검색으로 동작 확인
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     init_db(seed=True)

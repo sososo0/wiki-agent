@@ -96,6 +96,140 @@ def test_run_cycle_creates_shadow_for_good_patch_and_blocks_bad_patch(tmp_path, 
     assert "warning" in levels
 
 
+def test_run_cycle_blocks_shadow_near_duplicate_of_shadow_written_earlier_same_cycle(tmp_path, monkeypatch):
+    """두 gap이 같은 사이클에서 거의 같은 내용으로 큐레이션되면(예: 같은 주제를
+    다르게 표현한 질문이 mine.py의 정확매칭 그룹핑 때문에 별도 gap으로 잡힌 경우),
+    먼저 shadow로 쓰인 패치와 근접 중복인 두 번째 패치는 막혀야 한다 — 이전엔
+    게이트가 active 엔트리와만 비교해서 이 경우를 못 잡았다(core/pipeline/gate.py
+    passes_gate의 pending_shadow_entries)."""
+    same_content_llm_fn = lambda query_examples: {
+        "topic": "Password reset", "canonical": "Go to settings and reset your password.",
+        "body_md": "Account > Security > Reset password.",
+    }
+
+    db_path = str(tmp_path / "test_run_cycle_dup_shadow_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    _seed_retrieval_log("how do I reset my password", n=4, score=-5.0)
+    _seed_retrieval_log("how can i reset password", n=4, score=-5.0)  # 다른 norm_query -> 별도 gap
+
+    result = run_cycle(
+        gold_path=None, k=5,
+        llm_fn=same_content_llm_fn, judge_fn=lambda patch, existing_entries: (1.0, "ok"),
+        evaluate_fn=_stub_evaluate_fn,
+    )
+
+    assert result["mined"] == 2
+    assert len(result["shadow_written"]) == 1
+    assert any(r.get("reason") == "near-duplicate of existing entry" for r in result["rejected"])
+
+
+def test_run_cycle_cluster_paraphrases_merges_below_threshold_groups_into_one_gap(tmp_path, monkeypatch):
+    """--cluster-paraphrases(옵트인)가 없으면 같은 의미를 다르게 표현한 두 질문이
+    각각 min_freq(3) 미달(2개씩)이라 gap으로 안 잡힌다. 켜면 합쳐져서(빈도 4)
+    gap 1개로 잡혀야 한다 — mine.py 자체는 무수정(여전히 exact-match 그룹핑)."""
+    db_path = str(tmp_path / "test_run_cycle_cluster_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    _seed_retrieval_log("how do i reset my password", n=2, score=-5.0)
+    _seed_retrieval_log("how can i reset password", n=2, score=-5.0)  # 의미는 같지만 다른 norm_query
+
+    vectors = {
+        "how do i reset my password": [1.0, 0.0],
+        "how can i reset password": [0.95, 0.0],  # 유사(threshold 0.85 이상)
+    }
+
+    def _stub_cluster_embed_fn(texts):
+        import numpy as np
+        return np.array([vectors.get(t, [0.0, 1.0]) for t in texts])
+
+    without_clustering = run_cycle(
+        gold_path=None, k=5, llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn,
+        evaluate_fn=_stub_evaluate_fn,
+    )
+    assert without_clustering["mined"] == 0  # 각 그룹 freq=2 < min_freq=3
+
+    with_clustering = run_cycle(
+        gold_path=None, k=5, llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn,
+        evaluate_fn=_stub_evaluate_fn,
+        cluster_paraphrases=True, cluster_embed_fn=_stub_cluster_embed_fn,
+    )
+    assert with_clustering["mined"] == 1  # 합쳐져서 freq=4 >= min_freq=3
+
+
+def test_run_cycle_check_agentic_regression_warns_without_blocking_promotion(tmp_path, monkeypatch):
+    """--check-agentic-regression(옵트인)이 이전 사이클보다 점수가 떨어졌다고
+    감지하면 알림을 띄우지만, promote 결과(승격 여부)에는 절대 영향을 주지
+    않아야 한다(eval/agentic_eval.py 자체 HARD CONSTRAINT)."""
+    db_path = str(tmp_path / "test_run_cycle_agentic_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    # 이전 사이클의 agentic 지표를 cycle_history에 미리 심어둔다(비교 기준선).
+    wiki_store.add_cycle_history(
+        mined=0, shadow_count=0, promoted=False, activated_count=0,
+        recall_at_k=0.9, mrr=0.8, correctness=0.7,
+        agentic_task_success_rate=0.8, agentic_multihop_recall=0.8, agentic_avg_tool_calls=2.0,
+    )
+
+    def _stub_agentic_eval_fn(tasks, *, k=5, search_fn=None):
+        return {"task_success_rate": 0.3, "multihop_recall": 0.3, "avg_tool_calls": 2.0, "per_task": []}
+
+    result = run_cycle(
+        gold_path=None, k=5, evaluate_fn=_stub_evaluate_fn,
+        check_agentic_regression=True, agentic_eval_fn=_stub_agentic_eval_fn,
+    )
+
+    assert result["agentic"]["task_success_rate"] == 0.3
+    levels_and_titles = [(n[0], n[1]) for n in result["notifications"]]
+    assert any(level == "warning" and "에이전틱" in title for level, title in levels_and_titles)
+    # 승격 자체는 evaluate_fn(_stub_evaluate_fn, 항상 회귀로 보고하는 스텁)에만
+    # 좌우되어야 한다 — agentic 회귀 감지가 promote 결과에 전혀 영향을 안 준다는
+    # 것이 이 테스트의 핵심.
+    assert result["promote"]["promoted"] is False
+
+    history = wiki_store.list_cycle_history()
+    assert history[-1]["agentic_task_success_rate"] == 0.3
+
+
+def test_run_cycle_records_cycle_history_row(tmp_path, monkeypatch):
+    """사이클마다 cycle_history에 1행씩 쌓여야 누적 추이 페이지(/cycle-history)가
+    동작한다. 이 stub에서는 promote가 항상 회귀로 보고하므로(promoted=False),
+    저장되는 지표는 candidate가 아니라 base여야 한다."""
+    db_path = str(tmp_path / "test_run_cycle_history_wiki.db")
+    monkeypatch.setenv("WIKI_AGENT_DB", db_path)
+    wiki_store.DB_PATH = db_path
+    wiki_store.init_db(seed=True)
+
+    _seed_retrieval_log(PASSWORD_QUERY, n=4, score=-5.0)
+
+    result = run_cycle(
+        gold_path=None, k=5,
+        llm_fn=_stub_llm_fn, judge_fn=_stub_judge_fn, evaluate_fn=_stub_evaluate_fn,
+    )
+
+    history = wiki_store.list_cycle_history()
+    assert len(history) == 1
+    row = history[0]
+    assert row["mined"] == result["mined"]
+    assert row["shadow_count"] == len(result["shadow_written"])
+    assert row["promoted"] == 0
+    assert row["activated_count"] == 0
+    base = result["promote"]["base"]
+    assert row["recall_at_k"] == base["recall@k"]
+    assert row["mrr"] == base["mrr"]
+    assert row["correctness"] == base["correctness"]
+    # check_agentic_regression(옵트인)을 안 켰으니 agentic 컬럼은 전부 NULL이어야 함.
+    assert row["agentic_task_success_rate"] is None
+    assert row["agentic_multihop_recall"] is None
+    assert row["agentic_avg_tool_calls"] is None
+
+
 def test_run_cycle_window_days_excludes_old_log_rows(tmp_path, monkeypatch):
     """retrieval_log에 윈도우 밖(예: 30일 전)의 오래된 행만 있으면 기본 window_days로는
     gap이 마이닝되면 안 된다 — window_days=None(전체 히스토리)을 주면 다시 잡혀야 함.
@@ -218,9 +352,29 @@ def test_summary_notifications_no_warning_when_nothing_mined_and_not_promoted():
     assert [n[0] for n in notes] == ["info"]
 
 
+def test_summary_notifications_warns_on_agentic_regression():
+    """--check-agentic-regression(옵트인)이 이전 사이클보다 떨어졌다고 표시하면
+    경고가 떠야 한다 — 단, promote 자체에는 영향을 주지 않는다(알림 전용)."""
+    summary = _base_summary(agentic_regressed=True)
+    notes = summary_notifications(summary)
+    levels = [n[0] for n in notes]
+    assert "warning" in levels
+    assert any("에이전틱" in n[1] for n in notes if n[0] == "warning")
+
+
+def test_summary_notifications_no_agentic_warning_when_flag_not_set():
+    """summary에 agentic_regressed 키 자체가 없으면(플래그 기본 off) 경고 없음."""
+    notes = summary_notifications(_base_summary())
+    assert [n[0] for n in notes] == ["info"]
+
+
 def test_run_cycle_writes_error_notification_and_reraises_on_crash(tmp_path, monkeypatch):
     """사이클이 예외로 죽어도 종모양 알림에 남아야 한다 — 삼키지 않고
-    그대로 재raise해 hermes cron 자체의 실패 상태도 정상적으로 남아야 함."""
+    그대로 재raise해 hermes cron 자체의 실패 상태도 정상적으로 남아야 함.
+
+    notifications 메시지에는 예외 내용(str(e))을 그대로 담지 않는다 — GET
+    /notifications가 인증 없이 공개돼 있어, 내부 에러 상세가 그대로 노출되면
+    정보 유출이 된다. 상세는 재raise된 예외의 traceback(cron 로그)에서 본다."""
     import pytest
 
     db_path = str(tmp_path / "test_run_cycle_crash_wiki.db")
@@ -231,7 +385,7 @@ def test_run_cycle_writes_error_notification_and_reraises_on_crash(tmp_path, mon
     from scripts import run_update_cycle
 
     def _broken_run_cycle(**kwargs):
-        raise RuntimeError("boom")
+        raise RuntimeError("boom: /secret/internal/path leaked")
 
     monkeypatch.setattr(run_update_cycle, "run_cycle", _broken_run_cycle)
     monkeypatch.setattr(sys, "argv", ["run_update_cycle.py"])
@@ -242,4 +396,6 @@ def test_run_cycle_writes_error_notification_and_reraises_on_crash(tmp_path, mon
     notes = wiki_store.list_notifications()
     assert len(notes) == 1
     assert notes[0]["level"] == "error"
-    assert "boom" in notes[0]["message"]
+    assert "boom" not in notes[0]["message"]
+    assert "/secret/internal/path" not in notes[0]["message"]
+    assert notes[0]["message"]  # 그래도 사용자가 알아챌 수 있는 안내 문구는 있어야 함

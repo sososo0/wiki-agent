@@ -94,6 +94,20 @@ def test_parse_markdown_file_bad_encoding_best_effort(tmp_path):
     assert len(res["sections"]) >= 1
 
 
+def test_encoding_error_threshold_is_configurable(tmp_path, monkeypatch):
+    """ENCODING_ERROR_THRESHOLD를 낮추면, 이전엔 best-effort로 통과했던 같은
+    입력이 인코딩 오류로 실패해야 한다(MAX_FILE_BYTES와 같은 env-var화 패턴)."""
+    f = tmp_path / "bad.md"
+    f.write_bytes(b"# Title\nmostly valid text " + b"\xff" + b" more valid text\n")
+
+    res_default = parse.parse_markdown_file(str(f))
+    assert res_default["error"] is None  # 기본 임계값(0.05)에서는 통과
+
+    monkeypatch.setattr(parse, "ENCODING_ERROR_THRESHOLD", 0.0)
+    res_strict = parse.parse_markdown_file(str(f))
+    assert res_strict["error"] == "encoding error (too many invalid bytes)"
+
+
 def test_parse_directory_isolates_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(parse, "MAX_FILE_BYTES", 10)
     good1 = tmp_path / "good1.md"

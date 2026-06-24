@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wiki-agent 사이클 추이</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 0; color: #1f2937; }
+  header { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 16px; }
+  header h2 { margin: 0; font-size: 18px; }
+  header a { color: #2563eb; text-decoration: none; }
+  /* index.html과 동일한 갱신 알림 종 — graph.html과 같은 마크업/동작. */
+  #notif-wrap { margin-left: auto; position: relative; }
+  #notif-toggle {
+    border: 1px solid #e2e8f0; background: #fff; border-radius: 8px;
+    padding: 5px 11px; font-size: 13px; cursor: pointer; color: #374151;
+    position: relative;
+  }
+  #notif-toggle:hover { background: #f1f5f9; }
+  #notif-badge {
+    position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px;
+    background: #ef4444; color: #fff; border-radius: 999px; font-size: 10px;
+    line-height: 16px; text-align: center; padding: 0 3px; display: none;
+  }
+  #notif-badge.show { display: block; }
+  #notif-panel {
+    display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 20;
+    width: 340px; max-height: 420px; overflow-y: auto;
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08); padding: 6px;
+  }
+  #notif-panel.open { display: block; }
+  #notif-panel .empty { padding: 14px; font-size: 13px; color: #94a3b8; text-align: center; }
+  .notif-item {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 10px; border-radius: 8px; font-size: 13px; color: #1f2937;
+  }
+  .notif-item:hover { background: #f1f5f9; }
+  .notif-item.unread { background: #eff6ff; }
+  .notif-item .row { display: flex; align-items: center; gap: 6px; }
+  .notif-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .notif-item .dot.info { background: #2563eb; }
+  .notif-item .dot.warning { background: #f59e0b; }
+  .notif-item .dot.error { background: #ef4444; }
+  .notif-item .title { font-weight: 600; }
+  .notif-item .message { margin: 4px 0 0; color: #374151; line-height: 1.4; }
+  .notif-item .meta { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+  #info {
+    border-bottom: 1px solid #e2e8f0; padding: 16px 20px; background: #f8fafc;
+    font-size: 13px; color: #374151; line-height: 1.6;
+  }
+  #info p { margin: 0; max-width: 760px; }
+  #page-wrap { display: flex; align-items: flex-start; gap: 20px; padding: 20px; }
+  #content { flex: 1; min-width: 0; max-width: 900px; }
+  /* 표 옆의 빈 공간을 활용 — 사이클을 클릭하면 여기에 설명이 뜬다. */
+  #detail-panel {
+    width: 280px; flex-shrink: 0; border: 1px solid #e2e8f0; border-radius: 8px;
+    padding: 14px 16px; background: #f8fafc; font-size: 13px; color: #374151;
+    line-height: 1.6; position: sticky; top: 20px;
+  }
+  #detail-panel h4 { margin: 0 0 8px; font-size: 13px; }
+  #detail-panel p { margin: 0 0 8px; }
+  #detail-panel #detail-hint { color: #94a3b8; margin: 0; }
+  .detail-close {
+    float: right; border: none; background: none; color: #94a3b8;
+    font-size: 12px; cursor: pointer; padding: 0;
+  }
+  .detail-close:hover { color: #374151; }
+  tr.cycle-row { cursor: pointer; }
+  tr.cycle-row:hover { background: #f8fafc; }
+  tr.cycle-row.selected { background: #eff6ff; }
+  #empty-hint { color: #94a3b8; }
+  .legend { display: flex; gap: 18px; font-size: 12px; color: #64748b; margin-bottom: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 14px; height: 3px; display: inline-block; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 20px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f1f5f9; }
+  th { color: #64748b; font-size: 11px; text-transform: uppercase; cursor: help; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.ts-cell { white-space: pre-line; line-height: 1.3; }
+  .promoted-yes { color: #16a34a; }
+  .promoted-no { color: #94a3b8; }
+  #toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+  #toolbar button { border: 1px solid #e2e8f0; background: #fff; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: #374151; }
+  #toolbar button:hover { background: #f1f5f9; }
+  #page-size-wrap { font-size: 12px; color: #64748b; display: flex; align-items: center; gap: 6px; }
+  #page-size-wrap select { font-size: 12px; padding: 2px 4px; }
+  /* 표는 글자/패딩을 줄여가며 화면 폭에 맞춰 같이 작아지다가, min-width
+     바닥(420px)에 닿으면 그 밑으론 더 줄이지 않고 #table-wrap이 가로
+     스크롤을 보여준다 — 처음부터 스크롤바를 띄우는 대신 줄어들 수 있는
+     만큼은 먼저 줄어드는 단계를 거친다. */
+  #table-wrap { overflow-x: auto; }
+  table { min-width: 480px; }
+  /* 캔버스는 내부 해상도(width/height 속성)는 그대로 두고 CSS로만 비율 유지
+     축소 — 리사이즈 시 재드로우는 안 해서 약간 흐려질 수 있지만 데모 규모에는
+     충분하고, 가로 스크롤/잘림은 막아준다. */
+  #chart, #detail-panel canvas { max-width: 100%; height: auto; }
+
+  @media (max-width: 860px) {
+    /* 기본 align-items:flex-start는 가로 배치(행) 기준으로 정한 값인데,
+       column 방향에서는 cross-axis(=가로축) 정렬이 되어 #content가 자기
+       내용(표)의 자연스러운 너비만큼 늘어나 버린다(표가 줄어들지 않는 진짜
+       원인) — stretch로 바꿔 뷰포트 너비에 맞게 눌러준다. */
+    #page-wrap { flex-direction: column; align-items: stretch; }
+    #detail-panel { width: 100%; position: static; }
+    #toolbar { flex-wrap: wrap; }
+    table { font-size: 12px; }
+    th, td { padding: 5px 6px; }
+    tr.filter-row th { padding: 3px 6px; }
+    tr.filter-row input, tr.filter-row select { font-size: 11px; padding: 2px 4px; }
+    /* 시작~종료 두 날짜 입력이 나란히 있으면 그 칸 하나가 210px를 고정으로
+       먹어 표 전체가 못 줄어드는 가장 큰 원인이 된다 — 세로로 쌓아 그 칸의
+       최소 너비를 한 입력분(~110px)으로 줄인다. */
+    th.date-range-filter { flex-direction: column; align-items: stretch; min-width: 110px; gap: 2px; }
+    th.date-range-filter .range-sep { display: none; }
+  }
+  @media (max-width: 600px) {
+    table { font-size: 11px; }
+    th, td { padding: 4px 4px; }
+  }
+  #column-legend { display: none; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 14px; margin-top: 10px; font-size: 12px; color: #374151; line-height: 1.6; }
+  #column-legend dt { font-weight: 600; color: #1f2937; }
+  #column-legend dd { margin: 0 0 6px 0; color: #64748b; }
+  /* 본문 설명보다 한 단계 더 작고 옅게 — "추가로 곁들이는 용어 설명"이라는
+     느낌을 주기 위함(메인 설명과 시각적으로 구분). */
+  .term-hint, #column-legend small.term-hint { font-size: 11px; color: #94a3b8; }
+  #column-legend > p.term-hint { margin: 0 0 10px 0; padding-bottom: 8px; border-bottom: 1px dashed #e2e8f0; }
+  tr.filter-row input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  tr.filter-row th { padding: 4px 10px; }
+  /* 승격 컬럼처럼 값이 명확히 정해진 컬럼은 자유 입력 대신 드롭다운으로 —
+     #page-size와 같은 모양(클릭하면 화살표가 펼쳐지는 select). */
+  /* min-width를 넉넉히 줘서 "승격"/"미승격" 같은 옵션 글자가 드롭다운
+     화살표에 가려지지 않게 한다 — width:100%만으로는 컬럼 자체가 좁으면
+     (다른 칸들이 더 넓은 내용을 가져가서) select가 같이 좁아져 잘릴 수 있다. */
+  tr.filter-row select { width: 100%; min-width: 92px; box-sizing: border-box; font-size: 12px; padding: 3px 4px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  /* 시작/종료 두 날짜 입력을 "달력 ~ 달력"처럼 한 줄에 나란히 — 필터 칸
+     너비를 좁히지 않도록 date-range-filter th에서만 폭을 늘린다(다른 필터
+     칸의 input은 100% 그대로). */
+  th.date-range-filter { display: flex; align-items: center; gap: 4px; min-width: 210px; }
+  th.date-range-filter input { width: auto; }
+  th.date-range-filter .range-sep { color: #94a3b8; font-size: 12px; flex-shrink: 0; }
+  /* 값을 아직 안 고른 날짜 입력은 mm/dd/yyyy 같은 자리표시 텍스트 없이 달력
+     아이콘만 보이게 — 선택하면 JS가 has-value 클래스를 붙여 글자가
+     다시 보이게 한다(레이아웃 크기는 그대로, 글자 색만 바뀌므로 클릭 영역은
+     변하지 않음). -webkit- 전용 의사 엘리먼트라 Chromium/Safari 계열에서만
+     적용되고, 지원 안 하는 브라우저에서는 그냥 평소처럼 텍스트가 보인다. */
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-text,
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-month-field,
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-day-field,
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-year-field {
+    color: transparent;
+  }
+  td.select-cell, th.select-th { width: 28px; padding: 4px 6px; }
+  #detail-panel canvas { display: block; margin: 10px 0; }
+  #detail-panel .cmp-legend { display: flex; gap: 10px; font-size: 11px; color: #64748b; flex-wrap: wrap; margin-bottom: 6px; }
+  #detail-panel .cmp-legend span { display: inline-flex; align-items: center; gap: 4px; }
+  #detail-panel .cmp-legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <h2>wiki-agent 사이클 추이</h2>
+  <a href="/">← 채팅으로</a>
+  <a href="/static/graph.html">📊 그래프 보기</a>
+  <div id="notif-wrap">
+    <button id="notif-toggle" type="button">🔔<span id="notif-badge"></span></button>
+    <div id="notif-panel"></div>
+  </div>
+</header>
+<div id="info">
+  <p>
+    갱신 사이클(<code>scripts/run_update_cycle.py</code>)이 돌 때마다, 그 시점에
+    실제로 active인 위키 상태가 골드셋 기준으로 얼마나 좋은지(recall@k/mrr/
+    correctness/escalation_correctness)를 한 행씩 기록합니다. "대화 로그가 위키를
+    스스로 갱신한다"는 이 프로젝트의 핵심 서사가 실제로 검색 품질을 개선(혹은
+    적어도 퇴화시키지 않음)하는지를 여러 사이클에 걸쳐 눈으로 확인할 수 있습니다.
+  </p>
+  <p class="term-hint" style="margin-top:8px;">
+    공통 용어 — <b>골드셋</b>: 정답이 미리 정해져 있는 평가용 질문 모음(고정된 시험 문제지 같은 것).
+    <b>엔트리</b>: 위키 항목 하나(아래 표의 한 행에 대응하는 게 아니라, 위키 안의 지식 단위 하나).
+  </p>
+  <button id="legend-toggle" type="button" style="margin-top:8px; border:1px solid #e2e8f0; background:#fff; border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; color:#374151;">ℹ️ 컬럼 설명 보기</button>
+  <dl id="column-legend">
+    <dt>시각</dt><dd>그 사이클이 실행된 시각.</dd>
+    <dt>gap</dt><dd>
+      그 사이클에서 마이닝된(발견된) gap 개수 — 위키가 답을 잘 못 찾는다고 판단된, 반복된 저신뢰 질문 그룹의 수. <small class="term-hint">마이닝: 사람이 일일이 찾는 대신, 로그에서 반복되는 패턴을 자동으로 찾아내는 것.</small>
+    </dd>
+    <dt>shadow</dt><dd>그 사이클에서 새로 shadow로 반영된(아직 승격되지 않은) 후보 엔트리 수.</dd>
+    <dt>승격</dt><dd>
+      그 사이클 결과로 shadow 후보가 실제로 active로 승격됐는지 — 골드셋 회귀(recall@k/correctness 하락 등)가 감지되면 승격되지 않고 shadow로 남습니다. <small class="term-hint">회귀: 새 버전이 기존 버전보다 오히려 성능이 나빠지는 것.</small>
+    </dd>
+    <dt>recall@k</dt><dd>
+      그 시점의 active 위키로 골드셋 질문들을 검색했을 때, 정답 엔트리가 top-k 결과 안에 포함된 비율(0~1, 높을수록 좋음). <small class="term-hint">top-k: 검색했을 때 점수 순으로 상위 k개까지의 결과(예: k=5면 상위 5개).</small>
+    </dd>
+    <dt>mrr</dt><dd>Mean Reciprocal Rank — 정답이 검색 결과에서 몇 번째 순위로 나왔는지의 평균 역수(1위에 가까울수록 1에 가까움).</dd>
+    <dt>correctness</dt><dd>
+      LLM judge가 채점한 답변의 사실적 정확도(0~1, 골드셋의 기준 답변과 비교). <small class="term-hint">LLM judge: 사람이 일일이 채점하는 대신, AI 모델에게 답변이 맞는지 판정시키는 방식.</small>
+    </dd>
+    <dt>escalation</dt><dd>
+      KB가 답을 모르는(unanswerable) 골드셋 질문에 대해 "모른다"고 올바르게 인정한 비율 — 골드셋에 unanswerable 문항이 없으면 "—"로 표시. <small class="term-hint">KB: Knowledge Base(지식베이스) — 이 위키 자체를 가리키는 말.</small>
+    </dd>
+  </dl>
+</div>
+<div id="page-wrap">
+<div id="content">
+  <div id="chart-wrap">
+    <div class="legend">
+      <span><span class="swatch" style="background:#2563eb"></span>recall@k</span>
+      <span><span class="swatch" style="background:#16a34a"></span>correctness</span>
+      <span><span class="swatch" style="background:#f59e0b"></span>mrr</span>
+    </div>
+    <canvas id="chart" width="860" height="220"></canvas>
+  </div>
+  <div id="toolbar">
+    <span id="row-count-hint" style="font-size:12px; color:#94a3b8;"></span>
+    <span id="page-size-wrap">
+      표시 개수:
+      <select id="page-size">
+        <option value="10">10개</option>
+        <option value="25" selected>25개</option>
+        <option value="50">50개</option>
+        <option value="100">100개</option>
+        <option value="all">전체</option>
+      </select>
+    </span>
+  </div>
+  <div id="table-wrap">
+  <table id="table">
+    <thead>
+      <tr>
+        <th class="select-th" title="비교할 사이클을 체크하세요(2개 이상 선택하면 비교 화면이 표시됩니다)"></th>
+        <th title="그 사이클이 실행된 시각">시각</th>
+        <th title="그 사이클에서 마이닝된(발견된) gap 개수">gap</th>
+        <th title="그 사이클에서 새로 shadow로 반영된 후보 엔트리 수">shadow</th>
+        <th title="shadow 후보가 실제로 active로 승격됐는지(골드셋 회귀 시 승격 안 됨)">승격</th>
+        <th title="골드셋 질문 중 정답 엔트리가 top-k 검색 결과에 포함된 비율">recall@k</th>
+        <th title="정답이 검색 결과에서 몇 번째 순위로 나왔는지의 평균 역수(Mean Reciprocal Rank)">mrr</th>
+        <th title="LLM judge가 채점한 답변의 사실적 정확도">correctness</th>
+        <th title="KB가 답을 모르는 질문에 올바르게 모른다고 인정한 비율">escalation</th>
+      </tr>
+      <tr class="filter-row">
+        <th class="select-th"></th>
+        <th class="date-range-filter">
+          <input type="date" data-col="ts-start" aria-label="시작">
+          <span class="range-sep">~</span>
+          <input type="date" data-col="ts-end" aria-label="종료">
+        </th>
+        <th><input type="text" data-col="mined" placeholder="검색..."></th>
+        <th><input type="text" data-col="shadow_count" placeholder="검색..."></th>
+        <th>
+          <select data-col="promoted">
+            <option value="">전체</option>
+            <option value="승격">승격</option>
+            <option value="미승격">미승격</option>
+          </select>
+        </th>
+        <th><input type="text" data-col="recall_at_k" placeholder="검색..."></th>
+        <th><input type="text" data-col="mrr" placeholder="검색..."></th>
+        <th><input type="text" data-col="correctness" placeholder="검색..."></th>
+        <th><input type="text" data-col="escalation_correctness" placeholder="검색..."></th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  </div>
+  <p id="empty-hint" style="display:none">아직 기록된 사이클이 없습니다. 갱신 사이클을 1회 이상 실행하면 여기 쌓입니다.</p>
+  <p id="no-match-hint" style="display:none; color:#94a3b8;">필터에 맞는 사이클이 없습니다.</p>
+</div>
+<div id="detail-panel">
+  <p id="detail-hint">표에서 사이클을 체크하면 여기에 설명이 표시됩니다(2개 이상 체크하면 비교 화면).</p>
+</div>
+</div>
+
+<script>
+  function fmtDate(ts) {
+    if (!ts) return "";
+    return new Date(ts * 1000).toLocaleDateString("ko-KR", { year: "numeric", month: "2-digit", day: "2-digit" });
+  }
+
+  function fmtClock(ts) {
+    if (!ts) return "";
+    return new Date(ts * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // 상세 패널 문장처럼 한 줄로 자연스럽게 읽혀야 하는 곳에서 쓴다(표 칸은
+  // 날짜/시각을 줄바꿈으로 분리해서 따로 렌더링 — renderTable 참고).
+  function fmtTime(ts) {
+    if (!ts) return "";
+    return `${fmtDate(ts)} ${fmtClock(ts)}`;
+  }
+
+  // 시각 필터(<input type="date">)의 value와 같은 포맷(YYYY-MM-DD)으로 변환 —
+  // 자유 텍스트 substring 매칭이 아니라 날짜 단위 정확 일치를 위함.
+  function dateKey(ts) {
+    const d = new Date(ts * 1000);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // YYYY-MM-DD 문자열 비교 = 날짜 비교(Date 파싱/타임존 이슈 없음).
+  // 시작=종료면 예전의 "정확히 그 날" 필터와 동일하게 동작한다.
+  function inDateRange(ts, startStr, endStr) {
+    if (!startStr && !endStr) return true;
+    const key = dateKey(ts);
+    if (startStr && key < startStr) return false;
+    if (endStr && key > endStr) return false;
+    return true;
+  }
+
+  function drawChart(canvas, cycles) {
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    const pad = 30;
+    ctx.clearRect(0, 0, w, h);
+
+    if (cycles.length < 2) {
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "13px system-ui";
+      ctx.fillText("추이를 그리려면 사이클이 2개 이상 필요합니다.", pad, h / 2);
+      return;
+    }
+
+    // y축 0~1 그리드(메트릭이 전부 0~1 범위라 고정 스케일로 충분).
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "11px system-ui";
+    for (let i = 0; i <= 4; i++) {
+      const y = pad + (h - 2 * pad) * (1 - i / 4);
+      ctx.beginPath();
+      ctx.moveTo(pad, y);
+      ctx.lineTo(w - pad, y);
+      ctx.stroke();
+      ctx.fillText((i / 4).toFixed(2), 2, y + 3);
+    }
+
+    const xStep = (w - 2 * pad) / (cycles.length - 1);
+    const yOf = (v) => pad + (h - 2 * pad) * (1 - Math.max(0, Math.min(1, v ?? 0)));
+
+    function line(key, color) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      cycles.forEach((c, i) => {
+        const x = pad + i * xStep;
+        const y = yOf(c[key]);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    line("recall_at_k", "#2563eb");
+    line("correctness", "#16a34a");
+    line("mrr", "#f59e0b");
+  }
+
+  // 필터(검색)와 렌더링이 같은 표시 문자열을 보도록 한 곳에서 포맷한다 —
+  // 안 그러면 "화면엔 0.987인데 필터는 0.98712...로 비교" 같은 불일치가 생긴다.
+  function formatRow(c) {
+    // ts(시각)는 표/필터 모두 별도 경로(렌더링은 날짜+시각 줄바꿈, 필터는
+    // dateKey 정확 일치)를 쓰므로 여기엔 안 둔다.
+    return {
+      mined: String(c.mined),
+      shadow_count: String(c.shadow_count),
+      promoted: c.promoted ? "승격" : "미승격",
+      recall_at_k: (c.recall_at_k ?? 0).toFixed(3),
+      mrr: (c.mrr ?? 0).toFixed(3),
+      correctness: (c.correctness ?? 0).toFixed(3),
+      escalation_correctness: c.escalation_correctness == null ? "—" : c.escalation_correctness.toFixed(3),
+    };
+  }
+
+  // null/undefined(예: escalation_correctness 미적용)는 평균에서 제외하고,
+  // 전부 비어있으면 null을 반환해 호출부가 "—"처럼 따로 처리할 수 있게 한다.
+  function computeMetricAverage(cycles, key) {
+    const vals = cycles.map((c) => c[key]).filter((v) => v != null);
+    if (!vals.length) return null;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }
+
+  // 클릭한 사이클의 원본 숫자를 자연어 문장으로 풀어준다 — 표 칸의 숫자만으로는
+  // "그래서 이 사이클에 무슨 일이 있었는지"가 한눈에 안 들어오기 때문.
+  // prevCycle을 주면(표에 보이는 바로 위 행) 직전 사이클과 비교한 변화도 덧붙인다.
+  function describeCycle(c, prevCycle) {
+    const fmt3 = (v) => (v == null ? "—" : v.toFixed(3));
+    const lines = [];
+
+    lines.push(`gap ${c.mined}개를 마이닝해 shadow 후보 ${c.shadow_count}개를 새로 반영했습니다.`);
+
+    if (c.shadow_count > 0) {
+      lines.push(c.promoted
+        ? "골드셋 평가에서 회귀가 없어 active로 승격됐습니다."
+        : "골드셋 평가에서 회귀(recall@k/correctness 하락 등)가 감지되어 승격되지 않고 shadow로 남았습니다.");
+    } else {
+      lines.push("이 사이클에서는 새로 만든 shadow 후보가 없었습니다.");
+    }
+
+    lines.push(
+      `그 시점 골드셋 점수 — recall@k ${fmt3(c.recall_at_k)}, mrr ${fmt3(c.mrr)}, ` +
+      `correctness ${fmt3(c.correctness)}, escalation ${fmt3(c.escalation_correctness)}.`
+    );
+
+    if (prevCycle) {
+      const fields = [
+        ["recall@k", "recall_at_k"], ["mrr", "mrr"],
+        ["correctness", "correctness"], ["escalation", "escalation_correctness"],
+      ];
+      const deltas = [];
+      for (const [label, key] of fields) {
+        if (c[key] == null || prevCycle[key] == null) continue;
+        const diff = c[key] - prevCycle[key];
+        if (Math.abs(diff) < 0.0005) continue;
+        deltas.push(`${label} ${diff > 0 ? "+" : ""}${diff.toFixed(3)}`);
+      }
+      lines.push(deltas.length
+        ? `바로 위 사이클(${fmtTime(prevCycle.ts)}) 대비: ${deltas.join(", ")}.`
+        : `바로 위 사이클과 비교해 골드셋 점수 변화는 거의 없습니다.`);
+    }
+
+    return lines;
+  }
+
+  // 체크박스 선택을 모두 해제하고(applyFiltersAndRender가 다시 그릴 수 있게)
+  // 패널을 안내 문구로 되돌린다 — 닫기 버튼/빈 선택 상태에서 공통으로 쓴다.
+  function resetDetailPanel() {
+    const panel = document.getElementById("detail-panel");
+    panel.innerHTML = "";
+    const hint = document.createElement("p");
+    hint.id = "detail-hint";
+    hint.textContent = "표에서 사이클을 체크하면 여기에 설명이 표시됩니다(2개 이상 체크하면 비교 화면).";
+    panel.appendChild(hint);
+  }
+
+  function clearSelection() {
+    selectedIds.clear();
+    applyFiltersAndRender();
+  }
+
+  // 체크박스 1개 선택 시의 단일 사이클 설명 — .selected 클래스는 이제
+  // renderTable이 selectedIds로부터 직접 결정하므로 여기서는 패널 내용만 담당한다.
+  function renderSingleDetail(cycle, prevCycle) {
+    const panel = document.getElementById("detail-panel");
+    panel.innerHTML = "";
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "detail-close";
+    closeBtn.textContent = "✕ 닫기";
+    closeBtn.addEventListener("click", clearSelection);
+    panel.appendChild(closeBtn);
+
+    const heading = document.createElement("h4");
+    heading.textContent = `${fmtTime(cycle.ts)} 사이클`;
+    panel.appendChild(heading);
+
+    for (const line of describeCycle(cycle, prevCycle)) {
+      const p = document.createElement("p");
+      p.textContent = line;
+      panel.appendChild(p);
+    }
+  }
+
+  // 막대 차트 위/아래 범례 — 실제로 그려진 시리즈만 표시한다(기간 평균은
+  // 기간 필터가 없으면 생략되므로 항상 3개가 다 뜨는 건 아님).
+  function renderComparisonLegend(panel, series) {
+    const legend = document.createElement("div");
+    legend.className = "cmp-legend";
+    for (const [label, , color] of series) {
+      const span = document.createElement("span");
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = color;
+      span.append(swatch, label);
+      legend.appendChild(span);
+    }
+    panel.appendChild(legend);
+  }
+
+  function drawComparisonChart(canvas, series, metrics) {
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    const padL = 28, padR = 6, padT = 8, padB = 28;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "9px system-ui";
+    for (let i = 0; i <= 4; i++) {
+      const y = padT + (h - padT - padB) * (1 - i / 4);
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(w - padR, y);
+      ctx.stroke();
+      ctx.fillText((i / 4).toFixed(2), 0, y + 3);
+    }
+
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const groupW = plotW / metrics.length;
+    const n = series.length;
+    const barW = (groupW * 0.7) / n;
+    const yOf = (v) => padT + plotH * (1 - Math.max(0, Math.min(1, v ?? 0)));
+
+    ctx.font = "10px system-ui";
+    metrics.forEach((m, mi) => {
+      const groupX = padL + mi * groupW + groupW * 0.15;
+      series.forEach(([, values, color], si) => {
+        const v = values[mi];
+        if (v == null) return;  // 데이터 없음(전부 null) — "0점"으로 오인되지 않게 막대를 안 그림
+        const x = groupX + si * barW;
+        const y = yOf(v);
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, barW - 2, padT + plotH - y);
+      });
+      ctx.fillStyle = "#64748b";
+      ctx.textAlign = "center";
+      ctx.fillText(m.label, padL + mi * groupW + groupW / 2, h - padB + 14);
+      ctx.textAlign = "left";
+    });
+  }
+
+  // 비교 패널 본문: 차트 + describeComparison() 문단들.
+  function renderComparisonPanel(selectedCycles, allCycles, periodCycles) {
+    const panel = document.getElementById("detail-panel");
+    panel.innerHTML = "";
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "detail-close";
+    closeBtn.textContent = "✕ 닫기";
+    closeBtn.addEventListener("click", clearSelection);
+    panel.appendChild(closeBtn);
+
+    const heading = document.createElement("h4");
+    heading.textContent = `${selectedCycles.length}개 사이클 비교`;
+    panel.appendChild(heading);
+
+    const metrics = [
+      { key: "recall_at_k", label: "recall@k" },
+      { key: "mrr", label: "mrr" },
+      { key: "correctness", label: "correctness" },
+      { key: "escalation_correctness", label: "escalation" },
+    ];
+
+    const series = [
+      ["선택 평균", metrics.map((m) => computeMetricAverage(selectedCycles, m.key)), "#2563eb"],
+      ["전체 평균", metrics.map((m) => computeMetricAverage(allCycles, m.key)), "#94a3b8"],
+    ];
+    if (periodCycles) {
+      series.push(["기간 평균", metrics.map((m) => computeMetricAverage(periodCycles, m.key)), "#16a34a"]);
+    }
+
+    renderComparisonLegend(panel, series);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 240;
+    canvas.height = 160;
+    panel.appendChild(canvas);
+    drawComparisonChart(canvas, series, metrics);
+
+    for (const line of describeComparison(selectedCycles, allCycles, periodCycles)) {
+      const p = document.createElement("p");
+      p.textContent = line;
+      panel.appendChild(p);
+    }
+  }
+
+  // 선택 평균을 전체/기간 평균과 비교하는 문장 + (상관관계일 뿐 인과 아님을
+  // 분명히 하는 어조로) 승격 비율/마이닝량 같은 그럴법한 요인을 덧붙인다.
+  function describeComparison(selectedCycles, allCycles, periodCycles) {
+    const lines = [];
+    const metricLabels = [
+      ["recall@k", "recall_at_k"], ["mrr", "mrr"],
+      ["correctness", "correctness"], ["escalation", "escalation_correctness"],
+    ];
+
+    function deltaLine(title, baseCycles) {
+      const deltas = [];
+      for (const [label, key] of metricLabels) {
+        const a = computeMetricAverage(selectedCycles, key);
+        const b = computeMetricAverage(baseCycles, key);
+        if (a == null || b == null) continue;
+        const diff = a - b;
+        if (Math.abs(diff) < 0.0005) continue;
+        deltas.push(`${label} ${diff > 0 ? "+" : ""}${diff.toFixed(3)}`);
+      }
+      lines.push(deltas.length ? `${title}: ${deltas.join(", ")}.` : `${title}: 거의 차이가 없습니다.`);
+    }
+
+    deltaLine("선택 평균 vs 전체 평균", allCycles);
+    if (periodCycles) deltaLine("선택 평균 vs 기간 평균", periodCycles);
+
+    const promotedRatio = (cycles) => cycles.filter((c) => c.promoted).length / cycles.length;
+    const selPromoted = promotedRatio(selectedCycles);
+    const allPromoted = promotedRatio(allCycles);
+    if (Math.abs(selPromoted - allPromoted) >= 0.1) {
+      lines.push(
+        `선택한 사이클 중 승격 비율 ${(selPromoted * 100).toFixed(0)}% ` +
+        `(전체 평균 ${(allPromoted * 100).toFixed(0)}%) — 선택 구간에 승격이 ` +
+        `${selPromoted > allPromoted ? "더 자주" : "더 드물게"} 일어났습니다.`
+      );
+    }
+
+    for (const [label, key] of [["mined", "mined"], ["shadow", "shadow_count"]]) {
+      const selAvg = computeMetricAverage(selectedCycles, key);
+      const allAvg = computeMetricAverage(allCycles, key);
+      if (selAvg == null || allAvg == null || allAvg === 0) continue;
+      const relDiff = (selAvg - allAvg) / allAvg;
+      if (Math.abs(relDiff) >= 0.2) {
+        lines.push(
+          `선택 구간 평균 ${label} ${selAvg.toFixed(1)}개 (전체 평균 ${allAvg.toFixed(1)}개) — ` +
+          `${relDiff > 0 ? "더 많은" : "더 적은"} ${label === "mined" ? "gap이 마이닝된" : "shadow 후보가 생긴"} 시기입니다.`
+        );
+      }
+    }
+
+    return lines;
+  }
+
+  // selectedIds.size(0/1/2+)에 따라 패널을 분기해 그린다.
+  function renderDetailPanelForSelection(periodCycles) {
+    if (selectedIds.size === 0) {
+      resetDetailPanel();
+      return;
+    }
+    if (selectedIds.size === 1) {
+      const id = [...selectedIds][0];
+      const idx = allCycles.findIndex((c) => c.id === id);
+      if (idx === -1) { resetDetailPanel(); return; }
+      renderSingleDetail(allCycles[idx], idx > 0 ? allCycles[idx - 1] : null);
+      return;
+    }
+    const selectedCycles = allCycles
+      .filter((c) => selectedIds.has(c.id))
+      .sort((a, b) => a.ts - b.ts);
+    renderComparisonPanel(selectedCycles, allCycles, periodCycles);
+  }
+
+  function renderTable(cycles, rows) {
+    const tbody = document.querySelector("#table tbody");
+    tbody.innerHTML = "";
+    rows.forEach((r, i) => {
+      const tr = document.createElement("tr");
+      tr.className = "cycle-row" + (selectedIds.has(cycles[i].id) ? " selected" : "");
+
+      // 비교할 사이클을 고르는 체크박스 — 체크 상태는 selectedIds(Set)가 단일
+      // 진실 공급원이고, 여기서는 그 상태를 반영해 그리기만 한다(렌더 시점에
+      // .selected 클래스도 같이 결정 — 행 클릭 핸들러는 더 이상 없음).
+      const selectTd = document.createElement("td");
+      selectTd.className = "select-cell";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selectedIds.has(cycles[i].id);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedIds.add(cycles[i].id);
+        else selectedIds.delete(cycles[i].id);
+        // 표/차트 자체는 안 바뀌므로 필터 전체를 다시 돌리지 않고 패널만 갱신한다.
+        renderDetailPanelForSelection(lastPeriodCycles);
+        tr.classList.toggle("selected", checkbox.checked);
+      });
+      selectTd.appendChild(checkbox);
+      tr.appendChild(selectTd);
+
+      // 시각 칸은 날짜/시각을 줄 바꿔서 보여준다 — 한 줄로 길게 늘어놓는 것보다
+      // 좁은 칸에서 더 잘 읽힌다. textContent에 "\n"을 넣고 CSS로 줄바꿈을
+      // 살리는 방식(white-space: pre-line)이라 innerHTML 없이도 안전하다.
+      const tsTd = document.createElement("td");
+      tsTd.className = "ts-cell";
+      tsTd.textContent = `${fmtDate(cycles[i].ts)}\n${fmtClock(cycles[i].ts)}`;
+      tr.appendChild(tsTd);
+
+      const tds = [
+        [r.mined, true], [r.shadow_count, true],
+        [r.promoted, false], [r.recall_at_k, true], [r.mrr, true],
+        [r.correctness, true], [r.escalation_correctness, true],
+      ];
+      for (const [text, isNum] of tds) {
+        const td = document.createElement("td");
+        if (isNum) td.className = "num";
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      // 체크박스 칸이 새로 0번이 되면서 한 칸씩 밀림(기존엔 children[3]).
+      tr.children[4].className = r.promoted === "승격" ? "promoted-yes" : "promoted-no";
+      tbody.appendChild(tr);
+    });
+  }
+
+  let allCycles = [];   // /cycle-history 원본(ts ASC)
+  let allFormatted = []; // formatRow() 적용 결과, allCycles와 같은 인덱스
+  let selectedIds = new Set();   // 체크된 cycle.id 집합(인덱스 아님 — 필터/페이지가 바뀌어도 안정적)
+  let lastPeriodCycles = null;   // applyFiltersAndRender가 최근에 계산한 기간 평균용 사이클 목록
+
+  function applyFiltersAndRender() {
+    const startStr = document.querySelector('[data-col="ts-start"]').value;
+    const endStr = document.querySelector('[data-col="ts-end"]').value;
+
+    const filters = {};
+    // input/select 둘 다 같은 data-col 규약이라 한 셀렉터로 모은다.
+    // ts-start/ts-end는 위에서 따로 읽었으니(범위 비교라 substring 매칭과
+    // 다름) 여기서 제외.
+    document.querySelectorAll(".filter-row [data-col]").forEach((el) => {
+      if (el.dataset.col === "ts-start" || el.dataset.col === "ts-end") return;
+      const v = el.value.trim().toLowerCase();
+      if (v) filters[el.dataset.col] = v;
+    });
+
+    const matchedIdx = allFormatted
+      .map((r, i) => ({ r, i }))
+      .filter(({ r, i }) =>
+        inDateRange(allCycles[i].ts, startStr, endStr) &&
+        Object.entries(filters).every(([col, v]) => r[col].toLowerCase().includes(v))
+      )
+      .map(({ i }) => i);
+
+    const pageSizeRaw = document.getElementById("page-size").value;
+    const pageSize = pageSizeRaw === "all" ? matchedIdx.length : parseInt(pageSizeRaw, 10);
+    const shownIdx = matchedIdx.slice(Math.max(0, matchedIdx.length - pageSize));
+
+    const shownCycles = shownIdx.map((i) => allCycles[i]);
+    const shownRows = shownIdx.map((i) => allFormatted[i]);
+
+    document.getElementById("row-count-hint").textContent =
+      `전체 ${allCycles.length}개 중 ${matchedIdx.length}개 일치, ${shownCycles.length}개 표시`;
+    // 0개 일치해도 thead(필터 입력창)는 항상 보여야 필터를 다시 풀 수 있다 —
+    // 표 전체를 숨기면 입력창도 같이 사라져서 필터 해제가 불가능해진다.
+    document.getElementById("no-match-hint").style.display = matchedIdx.length ? "none" : "";
+
+    // 기간 평균은 matchedIdx 기준(shownIdx 아님) — 표시 개수를 바꿔도
+    // 기간 평균값 자체는 흔들리면 안 되기 때문.
+    const periodActive = !!(startStr || endStr);
+    lastPeriodCycles = periodActive ? matchedIdx.map((i) => allCycles[i]) : null;
+
+    drawChart(document.getElementById("chart"), shownCycles);
+    renderTable(shownCycles, shownRows);
+    // 필터/표시 개수가 바뀌면 이전에 체크해 두었던 사이클이 더는 표에 없을 수
+    // 있으니 보이는 행만 선택 상태로 남긴다.
+    const shownIds = new Set(shownCycles.map((c) => c.id));
+    selectedIds = new Set([...selectedIds].filter((id) => shownIds.has(id)));
+    renderDetailPanelForSelection(lastPeriodCycles);
+  }
+
+  // 날짜 입력은 값이 비어 있으면 has-value가 없어 위 CSS가 mm/dd/yyyy 텍스트를
+  // 숨긴다 — 값을 고르면 다시 보이게 클래스를 토글한다(초기 로드 시에도 한 번
+  // 맞춰둔다, 비록 지금은 항상 빈 값으로 시작하지만).
+  document.querySelectorAll(".filter-row input[data-col]").forEach((input) => {
+    if (input.type === "date") input.classList.toggle("has-value", !!input.value);
+    input.addEventListener("input", () => {
+      if (input.type === "date") input.classList.toggle("has-value", !!input.value);
+      applyFiltersAndRender();
+    });
+  });
+  document.querySelectorAll(".filter-row select[data-col]").forEach((select) => {
+    select.addEventListener("change", applyFiltersAndRender);
+  });
+  document.getElementById("page-size").addEventListener("change", applyFiltersAndRender);
+
+  const legendToggle = document.getElementById("legend-toggle");
+  const legend = document.getElementById("column-legend");
+  legendToggle.addEventListener("click", () => {
+    const hidden = legend.style.display === "none" || !legend.style.display;
+    legend.style.display = hidden ? "block" : "none";
+    legendToggle.textContent = hidden ? "ℹ️ 컬럼 설명 숨기기" : "ℹ️ 컬럼 설명 보기";
+  });
+
+  async function main() {
+    const resp = await fetch("/cycle-history");
+    const data = await resp.json();
+    allCycles = data.cycles || [];
+    allFormatted = allCycles.map(formatRow);
+
+    if (!allCycles.length) {
+      document.getElementById("chart-wrap").style.display = "none";
+      document.getElementById("table").style.display = "none";
+      document.getElementById("toolbar").style.display = "none";
+      document.getElementById("detail-panel").style.display = "none";
+      document.getElementById("empty-hint").style.display = "";
+      return;
+    }
+
+    applyFiltersAndRender();
+  }
+
+  // index.html/graph.html과 동일한 갱신 알림 종. 시각 표시는 이 파일에 이미
+  // 있는 fmtTime(날짜+시각 한 줄)을 재사용.
+  const notifToggle = document.getElementById("notif-toggle");
+  const notifPanel = document.getElementById("notif-panel");
+  const notifBadge = document.getElementById("notif-badge");
+
+  function closeNotifPanel() {
+    notifPanel.classList.remove("open");
+  }
+
+  async function refreshNotifBadge() {
+    try {
+      const resp = await fetch("/notifications");
+      const data = await resp.json();
+      if (data.unread_count > 0) {
+        notifBadge.textContent = data.unread_count > 99 ? "99+" : data.unread_count;
+        notifBadge.classList.add("show");
+      } else {
+        notifBadge.classList.remove("show");
+      }
+      return data.notifications || [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function openNotifPanel() {
+    notifPanel.classList.add("open");
+    notifPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
+    const items = await refreshNotifBadge();
+
+    if (!items.length) {
+      notifPanel.innerHTML = '<div class="empty">알림이 없습니다.</div>';
+      return;
+    }
+
+    notifPanel.innerHTML = "";
+    for (const n of items) {
+      const btn = document.createElement("button");
+      btn.className = "notif-item" + (n.read ? "" : " unread");
+      const row = document.createElement("div");
+      row.className = "row";
+      const dot = document.createElement("span");
+      dot.className = `dot ${n.level}`;
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "title";
+      titleSpan.textContent = n.title;
+      row.append(dot, titleSpan);
+      const messageDiv = document.createElement("div");
+      messageDiv.className = "message";
+      messageDiv.textContent = n.message;
+      const metaDiv = document.createElement("div");
+      metaDiv.className = "meta";
+      metaDiv.textContent = fmtTime(n.created_at);
+      btn.append(row, messageDiv, metaDiv);
+      btn.addEventListener("click", async () => {
+        if (!n.read) {
+          const adminToken = localStorage.getItem("wiki_agent_admin_token");
+          const resp = await fetch(`/notifications/${n.id}/read`, {
+            method: "POST",
+            headers: adminToken ? { "X-Admin-Token": adminToken } : {},
+          });
+          if (resp.ok) {
+            btn.classList.remove("unread");
+            n.read = 1;
+            refreshNotifBadge();
+          }
+        }
+      });
+      notifPanel.appendChild(btn);
+    }
+  }
+
+  notifToggle.addEventListener("click", () => {
+    if (notifPanel.classList.contains("open")) {
+      closeNotifPanel();
+    } else {
+      openNotifPanel();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!notifPanel.contains(e.target) && e.target !== notifToggle) {
+      closeNotifPanel();
+    }
+  });
+
+  refreshNotifBadge();
+  setInterval(refreshNotifBadge, 60000);
+
+  main();
+</script>
+</body>
+</html>
