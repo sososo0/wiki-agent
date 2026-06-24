@@ -108,28 +108,44 @@ def promote_if_better(
 ) -> Dict[str, Any]:
     """base(실제 active) vs candidate(active+shadow 시뮬레이션) 비교.
 
-    회귀(recall@k 또는 correctness 하락, 또는 mean_gap_recall이 임계치 미달) 없으면
-    실제 커밋, 있으면 아무 것도 쓰지 않는다.
+    recall@k/correctness가 골드셋 전체 기준으로 떨어지면(gold_set_regressed)
+    그 회귀를 특정 entry 탓이라고 추가 비용(entry별 재평가) 없이 확신할 수
+    없으므로 안전하게 전체를 막는다(기존 all-or-nothing 동작 그대로).
+
+    골드셋 자체는 안 떨어졌는데 mean_gap_recall만 임계치 미달인 경우는 다르다 —
+    evaluate_gap_recall이 이미 entry별 gap_recall을 공짜로 계산해주므로, 자기
+    출처 질문도 못 잡는 entry만 걸러내고 나머지는 승격한다(부분 승격). 한
+    사이클에 쌓인 shadow 중 단 하나가 나쁘다고 나머지 좋은 후보까지 영원히
+    막히던 문제를 줄인다.
     """
     base = evaluate_fn(wiki_store.search_wiki, gold, k=k)
     candidate_retriever = simulate_candidate_retriever()
     candidate = evaluate_fn(candidate_retriever, gold, k=k)
 
-    _, activated_ids, shadow = _merge_active_and_shadow()
+    _, _, shadow = _merge_active_and_shadow()
     gap_recall = evaluate_gap_recall(shadow, candidate_retriever, k=k)
 
-    regressed = (
+    gold_set_regressed = (
         candidate["recall@k"] < base["recall@k"]
         or candidate["correctness"] < base["correctness"]
-        or gap_recall["mean_gap_recall"] < gap_recall_threshold
     )
-    if regressed:
+    if gold_set_regressed:
         return {
             "base": base, "candidate": candidate, "gap_recall": gap_recall,
-            "promoted": False, "activated_entry_ids": [],
+            "promoted": False, "activated_entry_ids": [], "skipped_entry_ids": [],
         }
 
-    for s in shadow:
+    bad_ids = {
+        e["entry_id"] for e in gap_recall["per_entry"] if e["gap_recall"] < gap_recall_threshold
+    }
+    promotable = [s for s in shadow if (s.get("supersedes") or s["entry_id"]) not in bad_ids]
+    skipped_ids = [
+        s.get("supersedes") or s["entry_id"] for s in shadow
+        if (s.get("supersedes") or s["entry_id"]) in bad_ids
+    ]
+
+    activated: List[str] = []
+    for s in promotable:
         target_id = s.get("supersedes") or s["entry_id"]
         wiki_store.add_entry(
             target_id, s["topic"], s["canonical"], s.get("body_md"),
@@ -139,8 +155,10 @@ def promote_if_better(
         )
         if s.get("supersedes"):
             wiki_store.set_entry_status(s["entry_id"], "deprecated")
+        activated.append(target_id)
 
     return {
         "base": base, "candidate": candidate, "gap_recall": gap_recall,
-        "promoted": True, "activated_entry_ids": activated_ids,
+        "promoted": bool(activated), "activated_entry_ids": activated,
+        "skipped_entry_ids": skipped_ids,
     }

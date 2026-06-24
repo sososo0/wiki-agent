@@ -161,6 +161,47 @@ def test_evaluate_gap_recall_defaults_to_1_when_no_query_sources():
     assert result["per_entry"] == []
 
 
+def test_promote_if_better_partially_promotes_when_only_one_entry_has_low_gap_recall(tmp_path, monkeypatch):
+    """골드셋 자체는 회귀가 없는데 shadow 2개 중 1개만 자기 출처 질문을 못 잡으면,
+    그 1개만 shadow로 남기고 나머지는 승격해야 한다(entry 단위 부분 승격) —
+    이전엔 단 하나의 나쁜 후보가 같은 사이클의 좋은 후보까지 전부 막았다."""
+    _setup_db(tmp_path, monkeypatch)
+    wiki_store.add_entry(
+        "wiki_gap_good", "Good topic", "Good canonical.", "body",
+        status="shadow", provenance="curated_from_logs",
+        sources=[{"type": "retrieval_log_query", "query": "findable question", "verified": False}],
+    )
+    wiki_store.add_entry(
+        "wiki_gap_bad", "Bad topic", "Bad canonical.", "body",
+        status="shadow", provenance="curated_from_logs",
+        sources=[{"type": "retrieval_log_query", "query": "unfindable question", "verified": False}],
+    )
+    evaluate_fn = _stub_evaluate_factory(
+        base_scores={"recall@k": 0.5, "mrr": 0.4, "correctness": 0.3},
+        candidate_scores={"recall@k": 0.9, "mrr": 0.8, "correctness": 0.7},  # 골드셋은 개선
+    )
+
+    def _fake_retriever(**kwargs):
+        def _retrieve(query, k=5):
+            if query == "findable question":
+                return [{"entry_id": "wiki_gap_good"}]
+            return [{"entry_id": "something_else"}]
+        return _retrieve
+
+    monkeypatch.setattr(promote, "simulate_candidate_retriever", _fake_retriever)
+
+    result = promote.promote_if_better([{"q": "x"}], k=5, evaluate_fn=evaluate_fn)
+
+    assert result["promoted"] is True
+    assert result["activated_entry_ids"] == ["wiki_gap_good"]
+    assert result["skipped_entry_ids"] == ["wiki_gap_bad"]
+
+    active_ids = {e["entry_id"] for e in wiki_store.list_active_entries()}
+    shadow_ids = {e["entry_id"] for e in wiki_store.list_shadow_entries()}
+    assert "wiki_gap_good" in active_ids
+    assert "wiki_gap_bad" in shadow_ids
+
+
 def test_promote_if_better_blocks_on_low_gap_recall_even_if_gold_improves(tmp_path, monkeypatch):
     _setup_db(tmp_path, monkeypatch)
     wiki_store.add_entry(

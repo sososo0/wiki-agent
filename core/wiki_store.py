@@ -100,7 +100,14 @@ CREATE TABLE IF NOT EXISTS cycle_history (
   recall_at_k             REAL,
   mrr                     REAL,
   correctness             REAL,
-  escalation_correctness  REAL       -- NULL 가능(골드셋에 unanswerable 문항이 없으면)
+  escalation_correctness  REAL,      -- NULL 가능(골드셋에 unanswerable 문항이 없으면)
+  -- 아래 3개는 --check-agentic-regression(옵트인, 기본 off)일 때만 채워짐 — 안
+  -- 쓰면 전부 NULL. eval/agentic_eval.run_agentic_eval()의 출력을 그대로 시계열로
+  -- 쌓아, "이전 사이클보다 떨어졌는지"를 알림 전용으로 비교한다(승격 게이트와는
+  -- 무관 — agentic_eval.py 자체 HARD CONSTRAINT: 그 경로에 연결하지 않음).
+  agentic_task_success_rate REAL,
+  agentic_multihop_recall   REAL,
+  agentic_avg_tool_calls    REAL
 );
 
 -- KB(wiki_entry)가 아니라 그래프 화면(/static/graph.html) 표시용 파생 캐시 —
@@ -189,6 +196,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     feedback_cols = {row["name"] for row in conn.execute("PRAGMA table_info(feedback)")}
     if "reason" not in feedback_cols:
         conn.execute("ALTER TABLE feedback ADD COLUMN reason TEXT DEFAULT NULL")
+    cycle_history_cols = {row["name"] for row in conn.execute("PRAGMA table_info(cycle_history)")}
+    for col in ("agentic_task_success_rate", "agentic_multihop_recall", "agentic_avg_tool_calls"):
+        if col not in cycle_history_cols:
+            conn.execute(f"ALTER TABLE cycle_history ADD COLUMN {col} REAL DEFAULT NULL")
 
 
 def init_db(seed: bool = True) -> None:
@@ -685,20 +696,28 @@ def add_cycle_history(
     mined: int, shadow_count: int, promoted: bool, activated_count: int,
     recall_at_k: float, mrr: float, correctness: float,
     escalation_correctness: float = None, *, conn=None,
+    agentic_task_success_rate: float = None,
+    agentic_multihop_recall: float = None,
+    agentic_avg_tool_calls: float = None,
 ) -> None:
     """갱신 사이클(scripts/run_update_cycle.py) 1회 실행 후의 골드셋 지표 1행을
     기록 — promoted면 candidate(새로 active가 된 상태), 아니면 base(그대로인 현재
     active 상태)의 지표를 넘겨받는다(호출부 책임). 데모의 "사이클 추이" 페이지
-    (GET /cycle-history)가 시계열로 보여줌."""
+    (GET /cycle-history)가 시계열로 보여줌.
+
+    agentic_* 3개는 --check-agentic-regression(옵트인, 기본 off)일 때만 호출부가
+    값을 넘긴다 — 안 넘기면(기본 None) 그대로 NULL로 저장."""
     own = conn is None
     conn = conn or _conn()
     conn.execute(
         """INSERT INTO cycle_history
            (ts, mined, shadow_count, promoted, activated_count,
-            recall_at_k, mrr, correctness, escalation_correctness)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+            recall_at_k, mrr, correctness, escalation_correctness,
+            agentic_task_success_rate, agentic_multihop_recall, agentic_avg_tool_calls)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (time.time(), mined, shadow_count, int(promoted), activated_count,
-         recall_at_k, mrr, correctness, escalation_correctness))
+         recall_at_k, mrr, correctness, escalation_correctness,
+         agentic_task_success_rate, agentic_multihop_recall, agentic_avg_tool_calls))
     if own:
         conn.commit()
         conn.close()
@@ -710,7 +729,8 @@ def list_cycle_history(limit: int = 100) -> List[Dict[str, Any]]:
     conn = _conn()
     rows = conn.execute(
         """SELECT id, ts, mined, shadow_count, promoted, activated_count,
-                  recall_at_k, mrr, correctness, escalation_correctness
+                  recall_at_k, mrr, correctness, escalation_correctness,
+                  agentic_task_success_rate, agentic_multihop_recall, agentic_avg_tool_calls
            FROM cycle_history ORDER BY ts ASC LIMIT ?""",
         (limit,)).fetchall()
     conn.close()

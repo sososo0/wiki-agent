@@ -65,6 +65,15 @@ def summary_notifications(summary: Dict[str, Any]) -> list:
             "correctness 하락) 때문에 active로 승격되지 못했습니다. shadow 상태로만 남음.",
         ))
 
+    # --check-agentic-regression(옵트인)일 때만 summary에 이 키가 채워짐. 승격을
+    # 막지 않는 진단 전용 경고 — agentic_gold_set이 6개뿐이라 참고용으로만 본다.
+    if summary.get("agentic_regressed"):
+        notes.append((
+            "warning", "에이전틱(멀티홉) 평가 회귀 감지",
+            "이전 사이클보다 task_success_rate 또는 multihop_recall이 낮아졌습니다 — "
+            "승격은 막지 않았습니다(진단 전용, 골드셋이 작아 참고용).",
+        ))
+
     return notes
 
 
@@ -81,6 +90,12 @@ def run_cycle(
     use_web_search: bool = False,
     web_search_daily_cap: int = 5,
     web_search_llm_fn: Optional[Callable] = None,
+    cluster_paraphrases: bool = False,
+    cluster_embed_fn: Optional[Callable] = None,
+    cluster_similarity_threshold: float = 0.85,
+    check_agentic_regression: bool = False,
+    agentic_eval_fn: Optional[Callable] = None,
+    agentic_gold_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     from eval.run_eval import GOLD_PATH, evaluate, load_gold
 
@@ -97,6 +112,14 @@ def run_cycle(
     feedback_agg = ingest.ingest_feedback(wiki_store.list_feedback(since_ts=mining_since_ts))
     ingested_retrieval = ingest.ingest_retrieval_log(
         wiki_store.list_retrieval_log(since_ts=mining_since_ts))
+    # 옵트인(기본 off) — 같은 의미를 다르게 표현한 질문이 mine.py의 정확매칭
+    # 그룹핑 때문에 각각 min_freq 미달로 영원히 gap을 못 넘는 문제를 완화한다.
+    # mine.py 자체는 무수정(여전히 단순 exact-match) — 클러스터링은 여기서 미리
+    # norm_query를 통일해 넘긴다(core/pipeline/ingest.cluster_paraphrased_queries).
+    if cluster_paraphrases:
+        ingested_retrieval = ingest.cluster_paraphrased_queries(
+            ingested_retrieval, embed_fn=cluster_embed_fn,
+            similarity_threshold=cluster_similarity_threshold)
     gaps = mine.mine_gaps(ingested_retrieval, min_freq=min_freq, score_threshold=score_threshold)
 
     daily_cap = _daily_cap_from_feedback(feedback_agg["down_rate"])
@@ -183,6 +206,34 @@ def run_cycle(
     gold = load_gold(gold_path or GOLD_PATH)
     summary["promote"] = promote.promote_if_better(gold, k=k, evaluate_fn=evaluate_fn)
 
+    # 옵트인(기본 off) — 멀티홉 진단(eval/agentic_eval.py)을 알림 전용으로 돌린다.
+    # 그 파일 자체의 HARD CONSTRAINT(승격 게이트에 연결하지 않음)를 그대로 지켜
+    # promote 결과에는 절대 영향을 주지 않는다 — 골드셋이 6개뿐이라 노이즈로
+    # 좋은 업데이트를 막을 위험이 크기 때문(false positive 비용 > 가치).
+    agentic_result = None
+    if check_agentic_regression:
+        from eval.agentic_eval import GOLD_PATH as AGENTIC_GOLD_PATH
+        from eval.agentic_eval import load_agentic_gold, run_agentic_eval
+
+        # 영속 임베딩 캐시(core/wiki_store.PersistentEmbeddingCache)를 재사용 —
+        # 안 주면 멀티홉 루프의 검색마다 활성 엔트리 전체를 재인코딩하게 된다.
+        agentic_cache = wiki_store.PersistentEmbeddingCache()
+        agentic_fn = agentic_eval_fn or run_agentic_eval
+        agentic_tasks = load_agentic_gold(agentic_gold_path or AGENTIC_GOLD_PATH)
+        agentic_result = agentic_fn(
+            agentic_tasks, k=k,
+            search_fn=lambda query, k=5: wiki_store.search_wiki(query, k, cache=agentic_cache),
+        )
+        summary["agentic"] = agentic_result
+
+        previous_agentic = next(
+            (row for row in reversed(wiki_store.list_cycle_history())
+             if row.get("agentic_task_success_rate") is not None), None)
+        summary["agentic_regressed"] = bool(previous_agentic) and (
+            agentic_result["task_success_rate"] < previous_agentic["agentic_task_success_rate"]
+            or agentic_result["multihop_recall"] < previous_agentic["agentic_multihop_recall"]
+        )
+
     # cycle_history에 "지금 active 상태"의 골드셋 지표 1행을 남긴다 — 승격됐으면
     # candidate(=새로 active가 된 상태), 안 됐으면 base(=그대로인 현재 active
     # 상태)가 곧 지금의 실제 품질이다. 여러 사이클에 걸친 추이를 보려면 이 값들이
@@ -201,6 +252,9 @@ def run_cycle(
         mrr=metrics_src["mrr"],
         correctness=metrics_src["correctness"],
         escalation_correctness=metrics_src.get("escalation_correctness"),
+        agentic_task_success_rate=agentic_result["task_success_rate"] if agentic_result else None,
+        agentic_multihop_recall=agentic_result["multihop_recall"] if agentic_result else None,
+        agentic_avg_tool_calls=agentic_result["avg_tool_calls"] if agentic_result else None,
     )
 
     # 로그 텍스트를 나중에 파싱하는 대신, 이미 들고 있는 구조화된 summary에서
@@ -228,6 +282,15 @@ def main():
     parser.add_argument(
         "--web-search-daily-cap", type=int, default=5,
         help="사이클당 web_search 경로를 시도할 gap 수 상한(기본 5) — --use-web-search일 때만 적용")
+    parser.add_argument(
+        "--cluster-paraphrases", action="store_true",
+        help="mine_gaps 전에 norm_query를 임베딩 유사도로 묶어 paraphrase를 하나의 gap으로 "
+             "본다(기본 off — 임베딩 모델을 추가로 로딩/호출). mine.py 자체는 무수정.")
+    parser.add_argument(
+        "--check-agentic-regression", action="store_true",
+        help="eval/agentic_eval.py(멀티홉 진단)를 돌려 이전 사이클보다 떨어졌으면 알림만 "
+             "띄운다(기본 off — LLM 호출 추가 비용). 승격 게이트는 절대 안 막음(agentic_eval.py "
+             "자체 HARD CONSTRAINT, 골드셋이 6개뿐이라 false positive 위험이 큼).")
     args = parser.parse_args()
     window_days = args.window_days or None
 
@@ -237,6 +300,8 @@ def main():
             gold_path=args.gold, k=args.k, window_days=window_days,
             use_web_search=args.use_web_search,
             web_search_daily_cap=args.web_search_daily_cap,
+            cluster_paraphrases=args.cluster_paraphrases,
+            check_agentic_regression=args.check_agentic_regression,
         )
     except Exception:
         # 사이클이 죽어도 종모양 알림으로 보여야 한다 — hermes cron 로그만 보는
@@ -260,10 +325,13 @@ def main():
     print(f"rejected: {result['rejected']}")
     promote_result = result["promote"]
     print(f"promote: promoted={promote_result['promoted']} "
-          f"activated={promote_result['activated_entry_ids']}")
+          f"activated={promote_result['activated_entry_ids']} "
+          f"skipped={promote_result['skipped_entry_ids']}")
     print(f"  base:      {promote_result['base']}")
     print(f"  candidate: {promote_result['candidate']}")
     print(f"  gap_recall: {promote_result['gap_recall']}")
+    if "agentic" in result:
+        print(f"agentic: {result['agentic']}")
     for level, title, _ in result["notifications"]:
         print(f"notification[{level}]: {title}")
 
