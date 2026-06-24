@@ -54,6 +54,12 @@
   #panel .field { margin-bottom: 10px; }
   #panel .field b { display: block; color: #64748b; font-size: 12px; text-transform: uppercase; }
   #empty-hint { color: #94a3b8; }
+  /* 엣지 상세 패널에서 연결된 노드 이름을 클릭하면 그 노드로 포커스 이동 —
+     header a와 같은 링크 색을 재사용해 새 시각 언어를 추가하지 않는다. */
+  .node-link {
+    border: none; background: none; padding: 0; font: inherit;
+    color: #2563eb; text-decoration: underline; cursor: pointer;
+  }
 
   #entry-list-wrap {
     width: 260px; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column;
@@ -146,6 +152,29 @@
     doc_verified: "문서 검증됨", curated_from_logs: "대화 로그 기반 생성",
     curated_from_web: "웹 검색 기반 생성", agent_generated: "AI 생성(미검증)",
   };
+
+  // #info 범례에 이미 있는 문구를 그대로 옮긴 것 — 엣지 상세 패널에서도 같은
+  // 설명을 보여주기 위함(새로 지어내지 않음).
+  const EDGE_TYPE_LABEL = {
+    pending_update: "승격 대기", superseded_by: "교체 이력",
+    similar: "유사 항목", cluster_similar: "주제 간 유사",
+  };
+  const EDGE_TYPE_DESC = {
+    pending_update: "shadow 항목이 대체하려는 active 항목을 가리킴(승격 대기)",
+    superseded_by: "deprecated 항목이 과거에 대체했던 대상을 가리킴(교체 이력)",
+    similar: "두 항목의 내용이 임베딩 기준 서로 비슷함(방향 없음)",
+    cluster_similar: "큰 주제(backbone) 노드끼리도 서로 얼마나 비슷한지 나타냄",
+  };
+
+  // similar/cluster_similar의 weight는 core/graph.py의 기본
+  // similarity_threshold=0.3 때문에 실제로 [0.3, 1.0] 범위에서만 나온다(그
+  // 밑은 엣지 자체가 생성되지 않음) — 0~1 균등 3분할 대신 그 범위에 맞춘
+  // 경계값을 쓴다.
+  function similarityBucket(weight) {
+    if (weight >= 0.75) return "매우 높음";
+    if (weight >= 0.5) return "높음";
+    return "보통";
+  }
 
   // /graph 응답 전체, 현재 떠 있는 vis.Network, 지금이 전체 backbone 화면인지
   // 아니면 특정 클러스터만 보여주는 화면인지("detail:" + cluster_id) — 클릭
@@ -251,6 +280,63 @@
     addField("출처", PROVENANCE_LABEL[n.provenance] || n.provenance || "");
     addField("신뢰도", n.confidence ?? "");
     if (n.rejected_reason) addField("거부 이유", n.rejected_reason);
+  }
+
+  // 엣지(관계)를 클릭했을 때 같은 #panel에 보여줄 상세 정보 — 어떤 두 노드를
+  // 연결하는지(클릭하면 그 노드로 포커스 이동), 관계 종류, 관계의 정도.
+  function renderEdgeDetail(edge) {
+    const panel = document.getElementById("panel");
+    panel.innerHTML = "";
+
+    function addField(label, value) {
+      const div = document.createElement("div");
+      div.className = "field";
+      const b = document.createElement("b");
+      b.textContent = label;
+      div.append(b, value ?? "");
+      panel.appendChild(div);
+    }
+
+    // topic_ko/topic은 LLM 생성 텍스트라 textContent로만 채운다(renderDetail과
+    // 동일한 보안 원칙) — 클릭하면 그 노드로 포커스 이동(focusNode 재사용).
+    function addNodeLinkField(label, node, fallbackId) {
+      const div = document.createElement("div");
+      div.className = "field";
+      const b = document.createElement("b");
+      b.textContent = label;
+      div.appendChild(b);
+      if (node) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "node-link";
+        btn.textContent = node.topic_ko || node.topic || node.id;
+        btn.addEventListener("click", () => focusNode(node.id));
+        div.appendChild(btn);
+      } else {
+        div.append(fallbackId);
+      }
+      panel.appendChild(div);
+    }
+
+    const sourceNode = data.nodes.find((n) => n.id === edge.source);
+    const targetNode = data.nodes.find((n) => n.id === edge.target);
+
+    const h3 = document.createElement("h3");
+    h3.textContent = "관계 상세";
+    panel.appendChild(h3);
+
+    addNodeLinkField("연결된 항목 1", sourceNode, edge.source);
+    addNodeLinkField("연결된 항목 2", targetNode, edge.target);
+    addField("관계 종류", EDGE_TYPE_LABEL[edge.type] || edge.type);
+    addField("설명", EDGE_TYPE_DESC[edge.type] || "");
+
+    const isSimilarLike = edge.type === "similar" || edge.type === "cluster_similar";
+    addField(
+      "관계의 정도",
+      isSimilarLike
+        ? `${edge.weight.toFixed(2)} (${similarityBucket(edge.weight)})`
+        : "구조적 관계 (유사도 측정값 아님)"
+    );
   }
 
   document.getElementById("reset-clusters").addEventListener("click", () => location.reload());
@@ -392,17 +478,27 @@
     );
 
     network.on("click", (params) => {
-      if (!params.nodes.length) return;
-      const id = params.nodes[0];
-      if (network.isCluster(id)) {
-        const repId = id.startsWith("cluster:") ? id.slice("cluster:".length) : id;
-        renderClusterDetail(repId);
+      // 노드가 잡히면 항상 노드 클릭을 우선한다(엣지 분기는 노드가 전혀 안
+      // 잡혔을 때만 평가) — 같은 지점에 둘 다 걸리는 경우를 안전하게 처리.
+      if (params.nodes.length) {
+        const id = params.nodes[0];
+        if (network.isCluster(id)) {
+          const repId = id.startsWith("cluster:") ? id.slice("cluster:".length) : id;
+          renderClusterDetail(repId);
+          return;
+        }
+        const n = data.nodes.find((x) => x.id === id);
+        if (n) {
+          renderDetail(n);
+          setActiveListItem(id);
+        }
         return;
       }
-      const n = data.nodes.find((x) => x.id === id);
-      if (n) {
-        renderDetail(n);
-        setActiveListItem(id);
+      if (params.edges.length) {
+        // toVisEdge(e, idx)가 id: idx로 세팅했으므로 data.edges의 같은
+        // 인덱스를 그대로 조회하면 된다(별도 id 매핑 불필요).
+        const e = data.edges[params.edges[0]];
+        if (e) renderEdgeDetail(e);
       }
     });
 
