@@ -198,16 +198,31 @@
 
   function renderDetail(n) {
     const panel = document.getElementById("panel");
-    panel.innerHTML = `
-      <h3>${n.topic_ko || n.topic || n.id}</h3>
-      <div class="field"><b>항목 ID</b>${n.id}</div>
-      <div class="field"><b>상태</b>${STATUS_LABEL[n.status] || n.status}</div>
-      <div class="field"><b>한 줄 요약</b>${n.canonical_ko || n.canonical || ""}</div>
-      <div class="field"><b>본문</b>${n.body_md_ko || n.body_md || ""}</div>
-      <div class="field"><b>출처</b>${PROVENANCE_LABEL[n.provenance] || n.provenance || ""}</div>
-      <div class="field"><b>신뢰도</b>${n.confidence ?? ""}</div>
-      ${n.rejected_reason ? `<div class="field"><b>거부 이유</b>${n.rejected_reason}</div>` : ""}
-    `;
+    panel.innerHTML = "";
+
+    // topic/canonical/body_md/rejected_reason은 사용자 채팅 질문이나 웹검색
+    // 콘텐츠를 근거로 LLM이 작성한 텍스트라 그대로 신뢰할 수 없다(XSS 방지) —
+    // innerHTML 템플릿 대신 textContent로만 채운다.
+    function addField(label, value) {
+      const div = document.createElement("div");
+      div.className = "field";
+      const b = document.createElement("b");
+      b.textContent = label;
+      div.append(b, value ?? "");
+      panel.appendChild(div);
+    }
+
+    const h3 = document.createElement("h3");
+    h3.textContent = n.topic_ko || n.topic || n.id;
+    panel.appendChild(h3);
+
+    addField("항목 ID", n.id);
+    addField("상태", STATUS_LABEL[n.status] || n.status);
+    addField("한 줄 요약", n.canonical_ko || n.canonical || "");
+    addField("본문", n.body_md_ko || n.body_md || "");
+    addField("출처", PROVENANCE_LABEL[n.provenance] || n.provenance || "");
+    addField("신뢰도", n.confidence ?? "");
+    if (n.rejected_reason) addField("거부 이유", n.rejected_reason);
   }
 
   document.getElementById("reset-clusters").addEventListener("click", () => location.reload());
@@ -238,7 +253,10 @@
         const btn = document.createElement("button");
         btn.type = "button";
         btn.dataset.id = n.id;
-        btn.innerHTML = `${label}<span class="entry-id">${n.id}</span>`;
+        const idSpan = document.createElement("span");
+        idSpan.className = "entry-id";
+        idSpan.textContent = n.id;
+        btn.append(label, idSpan);  // label은 textContent와 동등하게 안전한 문자열 노드로 추가됨
         btn.addEventListener("click", () => onSelect(n.id));
         listEl.appendChild(btn);
       }

@@ -66,10 +66,15 @@ LLM 호출(`generate`)뿐이라 gap 마이닝 신호는 끊기지 않음. 카운
 conv_id는 UUID 형식 등) — 위반 시 자동 422. SQL 인젝션은 전체 파라미터 바인딩(`?`)이라
 원래부터 안전.
 
-**한계(범위 밖)**: `/conversations`/`/history/{conv_id}`는 인증이 없어 누구나 모든
-대화를 볼 수 있음 — 단일 SQLite 파일 기반 멀티유저 미지원의 연장선. 고치려면
-`conv_id` 발급 시 `owner_token`을 같이 만들어 `conversation_meta`에 저장하고 조회 시
-요구하는 방식이 필요(데이터 모델 변경, 별도 작업).
+**해결됨 — `owner_token` 범위 제한**: `/conversations`/`/history/{conv_id}`가 한때
+인증 없이 누구나 모든 대화를 볼 수 있었던 문제는 `owner_token`으로 해결했다.
+브라우저(localStorage)당 한 번 발급되는 토큰을 `/chat` 요청마다 같이 보내면
+`core/wiki_store.ensure_conversation_owner`가 그 conv_id에 처음 한 번만 기록한다
+(이미 기록돼 있으면 안 덮어씀 — 다른 토큰이 나중에 소유권을 가로채지 못함).
+`/conversations`는 owner_token이 없으면 빈 목록(fail-closed), `/history/{conv_id}`는
+기록된 owner_token과 다르면 404를 반환한다. 이 기능 이전에 만들어진 대화는
+owner_token이 NULL이라 `/conversations` 목록에는 안 뜨지만, conv_id를 직접 아는
+`/history` 조회는 기존처럼 허용된다(레거시 호환).
 
 ## 되묻기(clarify) + 피드백 이유
 

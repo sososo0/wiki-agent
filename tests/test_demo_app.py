@@ -129,23 +129,91 @@ def test_history_unknown_conv_id_returns_empty(client):
 
 
 def test_conversations_lists_past_conversations_with_preview(client):
+    """conv-a/conv-b가 같은 브라우저(같은 owner_token)가 만든 것처럼 동일 토큰을
+    보내야, 그 토큰으로 /conversations를 조회했을 때 둘 다 보여야 한다."""
     client.post("/chat", json={
         "conv_id": "conv-a", "turn_id": 0, "message": "first question in conv-a",
+        "owner_token": "owner-1",
     })
     client.post("/chat", json={
         "conv_id": "conv-b", "turn_id": 0, "message": "first question in conv-b",
+        "owner_token": "owner-1",
     })
     client.post("/chat", json={
         "conv_id": "conv-a", "turn_id": 1, "message": "second question in conv-a",
+        "owner_token": "owner-1",
     })
 
-    resp = client.get("/conversations")
+    resp = client.get("/conversations", params={"owner_token": "owner-1"})
     assert resp.status_code == 200
     convs = {c["conv_id"]: c for c in resp.json()["conversations"]}
     assert convs["conv-a"]["turn_count"] == 2
     assert convs["conv-a"]["first_query"] == "first question in conv-a"
     assert convs["conv-a"]["title"] == "stub title"
     assert convs["conv-b"]["turn_count"] == 1
+
+
+def test_conversations_without_owner_token_returns_empty(client):
+    """owner_token을 안 보내면(fail-closed) 아무 대화도 보이면 안 된다 — 누구
+    것인지 모르는 대화를 아무에게나 보여주지 않기 위함."""
+    client.post("/chat", json={
+        "conv_id": "conv-c", "turn_id": 0, "message": "first question in conv-c",
+        "owner_token": "owner-2",
+    })
+
+    resp = client.get("/conversations")
+    assert resp.status_code == 200
+    assert resp.json() == {"conversations": []}
+
+
+def test_conversations_does_not_leak_other_owners_conversations(client):
+    """owner_token이 다르면 다른 사람의 대화가 안 보여야 한다."""
+    client.post("/chat", json={
+        "conv_id": "conv-mine", "turn_id": 0, "message": "my question",
+        "owner_token": "owner-mine",
+    })
+    client.post("/chat", json={
+        "conv_id": "conv-theirs", "turn_id": 0, "message": "their question",
+        "owner_token": "owner-theirs",
+    })
+
+    resp = client.get("/conversations", params={"owner_token": "owner-mine"})
+    conv_ids = {c["conv_id"] for c in resp.json()["conversations"]}
+    assert conv_ids == {"conv-mine"}
+
+
+def test_history_with_wrong_owner_token_returns_404(client):
+    client.post("/chat", json={
+        "conv_id": "conv-protected", "turn_id": 0, "message": "secret question",
+        "owner_token": "owner-real",
+    })
+
+    resp = client.get("/history/conv-protected", params={"owner_token": "owner-wrong"})
+    assert resp.status_code == 404
+
+
+def test_history_with_correct_owner_token_succeeds(client):
+    client.post("/chat", json={
+        "conv_id": "conv-protected-2", "turn_id": 0, "message": "secret question",
+        "owner_token": "owner-real",
+    })
+
+    resp = client.get("/history/conv-protected-2", params={"owner_token": "owner-real"})
+    assert resp.status_code == 200
+    assert len(resp.json()["turns"]) == 1
+
+
+def test_history_for_legacy_conversation_without_owner_token_still_works(client):
+    """owner_token 없이(레거시) 만들어진 대화는 conv_id를 직접 아는 /history
+    조회는 여전히 허용된다(기존 동작 보존) — owner_token 미스매치 체크는
+    저장된 owner_token이 있을 때만 적용된다."""
+    client.post("/chat", json={
+        "conv_id": "conv-legacy", "turn_id": 0, "message": "legacy question",
+    })
+
+    resp = client.get("/history/conv-legacy", params={"owner_token": "anything-or-nothing"})
+    assert resp.status_code == 200
+    assert len(resp.json()["turns"]) == 1
 
 
 def test_chat_first_turn_sets_conversation_title(client):

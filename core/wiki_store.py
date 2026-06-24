@@ -69,8 +69,13 @@ CREATE TABLE IF NOT EXISTS feedback (
 
 -- 대화별 표시용 제목(첫 턴에 1회 생성). conversation_log의 원본 질문/답변과는
 -- 별개로, "이전 대화" 목록 UI가 매번 다시 요약하지 않도록 캐시해 둔다.
+-- owner_token: 브라우저(localStorage)당 한 번 발급되는 토큰 — /conversations·
+-- /history/{conv_id}가 다른 사용자의 대화를 보여주지 않게 범위를 제한하는 데
+-- 쓴다(ensure_conversation_owner 참고). 토큰이 없는(이 기능 이전에 만들어진)
+-- 대화는 NULL로 남아 /conversations 목록에는 안 뜨지만 conv_id를 직접 아는
+-- /history 조회는 기존처럼 허용한다.
 CREATE TABLE IF NOT EXISTS conversation_meta (
-  conv_id TEXT PRIMARY KEY, title TEXT, created_at REAL
+  conv_id TEXT PRIMARY KEY, title TEXT, created_at REAL, owner_token TEXT DEFAULT NULL
 );
 
 -- 갱신 사이클(scripts/run_update_cycle.py) 결과 알림. KB(wiki_entry)가 아니라
@@ -200,6 +205,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     for col in ("agentic_task_success_rate", "agentic_multihop_recall", "agentic_avg_tool_calls"):
         if col not in cycle_history_cols:
             conn.execute(f"ALTER TABLE cycle_history ADD COLUMN {col} REAL DEFAULT NULL")
+    conv_meta_cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversation_meta)")}
+    if "owner_token" not in conv_meta_cols:
+        conn.execute("ALTER TABLE conversation_meta ADD COLUMN owner_token TEXT DEFAULT NULL")
 
 
 def init_db(seed: bool = True) -> None:
@@ -605,12 +613,20 @@ def list_conversation(conv_id: str) -> List[Dict[str, Any]]:
     ]
 
 
-def list_conversations(limit: int = 50) -> List[Dict[str, Any]]:
+def list_conversations(limit: int = 50, *, owner_token: str = None) -> List[Dict[str, Any]]:
     """대화(conv_id) 단위로 묶어 최근 활동 순으로 반환(읽기 전용). 데모 채팅 UI가
     "이전 대화" 목록을 보여줄 수 있게 한다 — conv_id별 첫 질문(미리보기)·제목·턴 수·
     마지막 활동 시각만 집계할 뿐 conversation_log에 새로 쓰지 않는다. title은
     conversation_meta에 캐시된 값이 있으면 그걸 쓰고(set_conversation_title),
-    없으면(과거 대화 등) 프론트엔드가 first_query로 대체해 표시한다."""
+    없으면(과거 대화 등) 프론트엔드가 first_query로 대체해 표시한다.
+
+    owner_token이 없으면(호출부가 안 보냄) 빈 리스트를 반환한다(fail-closed) —
+    누구 것인지 모르는 대화를 아무에게나 보여주지 않기 위함. owner_token이 있으면
+    그 토큰으로 등록된(ensure_conversation_owner) 대화만 보인다 — owner_token이
+    NULL인(이 기능 이전에 만들어진) 대화는 어떤 토큰을 보내도 절대 안 뜬다
+    (LEFT JOIN이라도 WHERE m.owner_token = ?는 NULL과 절대 같지 않으므로 자동 제외)."""
+    if not owner_token:
+        return []
     conn = _conn()
     rows = conn.execute(
         """SELECT c.conv_id, COUNT(*) AS turn_count, MAX(c.ts) AS last_ts,
@@ -619,10 +635,11 @@ def list_conversations(limit: int = 50) -> List[Dict[str, Any]]:
                   m.title AS title
            FROM conversation_log c
            LEFT JOIN conversation_meta m ON m.conv_id = c.conv_id
+           WHERE m.owner_token = ?
            GROUP BY c.conv_id
            ORDER BY last_ts DESC
            LIMIT ?""",
-        (limit,)).fetchall()
+        (owner_token, limit)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -637,6 +654,31 @@ def set_conversation_title(conv_id: str, title: str) -> None:
         (conv_id, title, time.time()))
     conn.commit()
     conn.close()
+
+
+def ensure_conversation_owner(conv_id: str, owner_token: str) -> None:
+    """conv_id의 owner_token을 처음 한 번만 기록한다 — 이미 기록돼 있으면 절대
+    덮어쓰지 않는다(다른 owner_token이 나중에 같은 conv_id의 소유권을 "주장"해서
+    가로채지 못하게). demo/app.py의 /chat 핸들러가 매 턴 호출해도 안전(멱등)."""
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO conversation_meta (conv_id, owner_token, created_at) VALUES (?,?,?)
+           ON CONFLICT(conv_id) DO UPDATE SET
+             owner_token = COALESCE(conversation_meta.owner_token, excluded.owner_token)""",
+        (conv_id, owner_token, time.time()))
+    conn.commit()
+    conn.close()
+
+
+def get_conversation_owner_token(conv_id: str) -> Optional[str]:
+    """conv_id에 기록된 owner_token(없으면 None — 이 기능 이전에 만들어진
+    레거시 대화). demo/app.py의 /history/{conv_id}가 요청자의 owner_token과
+    비교해 다른 사용자의 대화를 막는 데 쓴다."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT owner_token FROM conversation_meta WHERE conv_id = ?", (conv_id,)).fetchone()
+    conn.close()
+    return row["owner_token"] if row else None
 
 
 def submit_feedback(conv_id, turn_id, thumb, reason=None):

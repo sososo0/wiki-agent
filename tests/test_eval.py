@@ -229,6 +229,26 @@ def test_judge_quality_returns_min_scores_when_api_call_fails(monkeypatch):
                        "rationale": "judge call failed: simulated API failure"}
 
 
+def test_judge_answer_logs_warning_when_response_is_neither_yes_nor_no(monkeypatch, caplog):
+    monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _StubClient("maybe, kind of"))
+
+    with caplog.at_level("WARNING"):
+        result = judge_answer("some answer", _EX)
+
+    assert result == 0  # 판정 자체는 그대로 fail-closed
+    assert any("neither yes nor no" in r.message for r in caplog.records)
+
+
+def test_judge_answer_does_not_warn_when_response_is_yes_or_no(monkeypatch, caplog):
+    monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _StubClient("no, it does not"))
+
+    with caplog.at_level("WARNING"):
+        result = judge_answer("some answer", _EX)
+
+    assert result == 0
+    assert not any("neither yes nor no" in r.message for r in caplog.records)
+
+
 def test_judge_quality_returns_min_scores_when_response_is_not_json(monkeypatch):
     monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _StubClient("not valid json"))
 

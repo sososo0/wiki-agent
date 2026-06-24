@@ -31,7 +31,7 @@ load_dotenv(ROOT / ".env")
 
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -404,6 +404,12 @@ class ChatRequest(BaseModel):
     # 질문과 합쳐 generate()를 호출한다(클라이언트는 더 이상 문자열을 조립하지
     # 않음 — "진짜 하네스"의 핵심).
     force_answer: bool = False
+    # 브라우저(localStorage)당 한 번 발급되는 토큰 — /conversations·
+    # /history/{conv_id}가 다른 사용자의 대화를 보여주지 않게 범위를 제한하는 데
+    # 쓴다(core/wiki_store.ensure_conversation_owner). 안 보내면(구버전 클라이언트)
+    # 그 대화는 owner_token 없는 레거시로 남는다 — /history는 그대로 되지만
+    # /conversations 목록에는 안 뜬다.
+    owner_token: Optional[str] = Field(default=None, max_length=64, pattern=_CONV_ID_RE)
 
 
 class FeedbackRequest(BaseModel):
@@ -473,6 +479,10 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks, request: Request):
         answer = result["answer"]
         cited_ids = result["entry_ids_used"] or [h["entry_id"] for h in hits]
 
+    if req.owner_token:
+        # 처음 한 번만 기록됨(이미 있으면 안 덮어씀) — 매 턴 호출해도 안전.
+        wiki_store.ensure_conversation_owner(req.conv_id, req.owner_token)
+
     wiki_store.log_turn(
         req.conv_id, req.turn_id, req.message, answer,
         [h["entry_id"] for h in hits],
@@ -511,18 +521,29 @@ def graph():
 
 
 @app.get("/history/{conv_id}")
-def history(conv_id: str):
+def history(conv_id: str, owner_token: Optional[str] = None):
     """conv_id의 대화 로그를 그대로 반환 — 채팅 UI가 새로고침 후에도 이어서
-    보여줄 수 있게 한다(읽기 전용, conversation_log 조회만)."""
+    보여줄 수 있게 한다(읽기 전용, conversation_log 조회만).
+
+    owner_token이 기록돼 있는데(누군가 이 conv_id를 소유) 요청자가 보낸 값과
+    다르면 404로 응답한다(타인 대화를 노출하는 대신 "없는 대화"처럼 보이게) —
+    owner_token이 아예 기록 안 된(레거시) conv_id는 누구나 직접 conv_id를
+    알면 그대로 조회 가능(기존 동작 보존)."""
+    stored_owner = wiki_store.get_conversation_owner_token(conv_id)
+    if stored_owner and stored_owner != owner_token:
+        raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다.")
     return {"turns": wiki_store.list_conversation(conv_id)}
 
 
 @app.get("/conversations")
-def conversations():
+def conversations(owner_token: Optional[str] = None):
     """지금까지의 모든 대화 목록(미리보기 포함)을 반환 — 채팅 UI의 "이전 대화"
     패널이 conv_id 하나만 기억하는 대신 과거 대화 전체를 보여줄 수 있게 한다
-    (읽기 전용, conversation_log 집계만)."""
-    return {"conversations": wiki_store.list_conversations()}
+    (읽기 전용, conversation_log 집계만).
+
+    owner_token이 없으면 빈 목록을 반환한다(fail-closed) — 그 토큰으로
+    ensure_conversation_owner가 등록한 대화만 보인다."""
+    return {"conversations": wiki_store.list_conversations(owner_token=owner_token)}
 
 
 @app.get("/cycle-history")

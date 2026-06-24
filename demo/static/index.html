@@ -252,6 +252,7 @@
 
 <script>
   const LS_CONV_ID = "wiki_agent_conv_id";
+  const LS_OWNER_TOKEN = "wiki_agent_owner_token";
   const log = document.getElementById("log");
   const intro = document.getElementById("intro");
   const form = document.getElementById("chat-form");
@@ -259,6 +260,14 @@
 
   let convId = localStorage.getItem(LS_CONV_ID);
   let turnId = 0;
+
+  // 브라우저당 한 번만 발급 — "새 대화"를 눌러도(convId는 바뀜) 안 바뀐다.
+  // /conversations·/history가 이 토큰으로 "내 대화"만 보여주는 데 쓰인다.
+  let ownerToken = localStorage.getItem(LS_OWNER_TOKEN);
+  if (!ownerToken) {
+    ownerToken = crypto.randomUUID();
+    localStorage.setItem(LS_OWNER_TOKEN, ownerToken);
+  }
 
   function hideIntro() {
     intro.style.display = "none";
@@ -413,7 +422,7 @@
     log.innerHTML = "";
     intro.style.display = "";
     try {
-      const resp = await fetch(`/history/${convId}`);
+      const resp = await fetch(`/history/${convId}?owner_token=${encodeURIComponent(ownerToken)}`);
       const data = await resp.json();
       for (const t of data.turns || []) {
         addMessage("user", t.query);
@@ -459,7 +468,7 @@
   async function openHistoryPanel() {
     historyPanel.classList.add("open");
     historyPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
-    const resp = await fetch("/conversations");
+    const resp = await fetch(`/conversations?owner_token=${encodeURIComponent(ownerToken)}`);
     const data = await resp.json();
     const convs = data.conversations || [];
 
@@ -472,10 +481,15 @@
     for (const c of convs) {
       const btn = document.createElement("button");
       btn.className = "history-item" + (c.conv_id === convId ? " active" : "");
-      btn.innerHTML = `
-        <div class="preview">${c.title || c.first_query || "(빈 대화)"}</div>
-        <div class="meta">${fmtTime(c.last_ts)} · ${c.turn_count}턴</div>
-      `;
+      // title/first_query는 사용자가 입력한 채팅 메시지 원문일 수 있어(XSS 방지)
+      // innerHTML 대신 textContent로 삽입한다.
+      const preview = document.createElement("div");
+      preview.className = "preview";
+      preview.textContent = c.title || c.first_query || "(빈 대화)";
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = `${fmtTime(c.last_ts)} · ${c.turn_count}턴`;
+      btn.append(preview, meta);
       btn.addEventListener("click", () => {
         loadConversation(c.conv_id);
         closeHistoryPanel();
@@ -540,11 +554,23 @@
     for (const n of items) {
       const btn = document.createElement("button");
       btn.className = "notif-item" + (n.read ? "" : " unread");
-      btn.innerHTML = `
-        <div class="row"><span class="dot ${n.level}"></span><span class="title">${n.title}</span></div>
-        <div class="message">${n.message}</div>
-        <div class="meta">${fmtTime(n.created_at)}</div>
-      `;
+      // title/message는 지금은 항상 신뢰된 오프라인 스크립트가 만든 고정 문구지만,
+      // 나중에 동적 텍스트가 들어올 수 있는 sink라 처음부터 textContent로 삽입한다.
+      const row = document.createElement("div");
+      row.className = "row";
+      const dot = document.createElement("span");
+      dot.className = `dot ${n.level}`;
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "title";
+      titleSpan.textContent = n.title;
+      row.append(dot, titleSpan);
+      const messageDiv = document.createElement("div");
+      messageDiv.className = "message";
+      messageDiv.textContent = n.message;
+      const metaDiv = document.createElement("div");
+      metaDiv.className = "meta";
+      metaDiv.textContent = fmtTime(n.created_at);
+      btn.append(row, messageDiv, metaDiv);
       btn.addEventListener("click", async () => {
         if (!n.read) {
           await fetch(`/notifications/${n.id}/read`, { method: "POST" });
@@ -584,7 +610,9 @@
     const resp = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conv_id: convId, turn_id: turn, message, force_answer: forceAnswer }),
+      body: JSON.stringify({
+        conv_id: convId, turn_id: turn, message, force_answer: forceAnswer, owner_token: ownerToken,
+      }),
     });
     const data = await resp.json();
     typingEl.remove();

@@ -21,6 +21,7 @@ promote.py의 promote_if_better가 정확히 "recall@k"/"correctness" 키로 회
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -39,7 +40,21 @@ JUDGE_MODEL = os.environ.get("EVAL_JUDGE_MODEL", "claude-haiku-4-5")
 GOLD_PATH = Path(__file__).resolve().parent / "gold_set.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent / "baseline.json"
 
+logger = logging.getLogger(__name__)
+
 _client = None
+
+
+def _parse_yes_no(text: str, context: str) -> int:
+    """judge 응답을 yes=1/no=0으로 해석. "yes"도 "no"도 아닌 애매한 응답이면
+    경고 로그를 남긴다 — 판정 자체는 여전히 0(fail-closed, 동작은 안 바뀜),
+    judge 캘리브레이션 문제(형식을 안 지키는 응답이 얼마나 되는지)를 가시화."""
+    normalized = text.strip().lower()
+    if normalized.startswith("yes"):
+        return 1
+    if not normalized.startswith("no"):
+        logger.warning("judge response was neither yes nor no (%s): %r", context, text)
+    return 0
 
 
 def _anthropic_client():
@@ -111,7 +126,7 @@ def judge_answer(answer, ex, model=JUDGE_MODEL):
     except Exception:  # noqa: BLE001 - judge 호출 실패가 평가 전체를 막으면 안 됨
         return 0
     text = next((b.text for b in resp.content if b.type == "text"), "")
-    return 1 if text.strip().lower().startswith("yes") else 0
+    return _parse_yes_no(text, "judge_answer")
 
 
 def judge_escalation(answer, ex, model=JUDGE_MODEL):
@@ -137,7 +152,7 @@ def judge_escalation(answer, ex, model=JUDGE_MODEL):
     except Exception:  # noqa: BLE001 - judge 호출 실패가 평가 전체를 막으면 안 됨
         return 0
     text = next((b.text for b in resp.content if b.type == "text"), "")
-    return 1 if text.strip().lower().startswith("yes") else 0
+    return _parse_yes_no(text, "judge_escalation")
 
 
 def _extract_json_object(text: str) -> str:

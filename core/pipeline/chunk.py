@@ -115,10 +115,16 @@ def to_doc_candidates(
     doc_path: str, doc_hash: str, chunks: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """chunk -> mine.mine_gaps()의 출력과 같은 역할(후속 curate 단계의 입력)을
-    하는 candidate 리스트. 콘텐츠 기반 chunk_hash로 결정적."""
+    하는 candidate 리스트. 콘텐츠 기반 chunk_hash로 결정적.
+
+    chunk_hash는 공백을 정규화한 텍스트로 계산한다(c["text"] 자체, 즉 LLM에
+    넘기는 실제 콘텐츠는 그대로 둠) — 들여쓰기/줄바꿈/trailing space만 바뀐
+    재실행은 dedupe.py가 "콘텐츠 불변"으로 보고 skip 분기를 타서, 의미 없는
+    포맷팅 변경마다 전체 재큐레이션(LLM 호출)이 일어나는 걸 막는다."""
     candidates = []
     for c in chunks:
-        chunk_hash = hashlib.sha1(c["text"].encode("utf-8")).hexdigest()
+        normalized = " ".join(c["text"].split())
+        chunk_hash = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
         candidates.append({
             "type": "doc_chunk",
             "doc_path": doc_path,

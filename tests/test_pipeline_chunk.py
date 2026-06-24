@@ -99,3 +99,29 @@ def test_to_doc_candidates_is_deterministic():
     assert cands1[0]["doc_path"] == "docs/a.md"
     assert cands1[0]["doc_hash"] == "hash123"
     assert "chunk_hash" in cands1[0]
+
+
+def test_chunk_hash_ignores_whitespace_only_differences():
+    """들여쓰기/줄바꿈/trailing space만 다르면 같은 chunk_hash가 나와야 한다 —
+    dedupe.py가 "콘텐츠 불변"으로 보고 불필요한 재큐레이션(LLM 호출)을 막는다."""
+    sections_a = [_section(["A"], "Some content here.\n\nWith a second line.")]
+    sections_b = [_section(["A"], "  Some   content here.\n\n\nWith a second line.   ")]
+
+    chunks_a = chunk.chunk_sections(sections_a, max_chars=2000, min_chars=5)
+    chunks_b = chunk.chunk_sections(sections_b, max_chars=2000, min_chars=5)
+
+    hash_a = chunk.to_doc_candidates("docs/a.md", "h", chunks_a)[0]["chunk_hash"]
+    hash_b = chunk.to_doc_candidates("docs/a.md", "h", chunks_b)[0]["chunk_hash"]
+    assert hash_a == hash_b
+
+
+def test_chunk_hash_still_differs_for_real_content_changes():
+    sections_a = [_section(["A"], "Some content here that is long enough.")]
+    sections_b = [_section(["A"], "Some different content here that is long enough.")]
+
+    chunks_a = chunk.chunk_sections(sections_a, max_chars=2000, min_chars=5)
+    chunks_b = chunk.chunk_sections(sections_b, max_chars=2000, min_chars=5)
+
+    hash_a = chunk.to_doc_candidates("docs/a.md", "h", chunks_a)[0]["chunk_hash"]
+    hash_b = chunk.to_doc_candidates("docs/a.md", "h", chunks_b)[0]["chunk_hash"]
+    assert hash_a != hash_b
