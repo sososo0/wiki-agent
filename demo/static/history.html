@@ -63,10 +63,23 @@
      화살표에 가려지지 않게 한다 — width:100%만으로는 컬럼 자체가 좁으면
      (다른 칸들이 더 넓은 내용을 가져가서) select가 같이 좁아져 잘릴 수 있다. */
   tr.filter-row select { width: 100%; min-width: 92px; box-sizing: border-box; font-size: 12px; padding: 3px 4px; border: 1px solid #e2e8f0; border-radius: 4px; }
-  /* 시작/종료 두 날짜 입력을 한 칸에 나란히 — 필터 칸 너비를 좁히지 않도록
-     date-range-filter th에서만 폭을 늘린다(다른 필터 칸의 input은 100% 그대로). */
-  th.date-range-filter input { width: auto; margin-bottom: 2px; }
-  th.date-range-filter { min-width: 130px; }
+  /* 시작/종료 두 날짜 입력을 "달력 ~ 달력"처럼 한 줄에 나란히 — 필터 칸
+     너비를 좁히지 않도록 date-range-filter th에서만 폭을 늘린다(다른 필터
+     칸의 input은 100% 그대로). */
+  th.date-range-filter { display: flex; align-items: center; gap: 4px; min-width: 210px; }
+  th.date-range-filter input { width: auto; }
+  th.date-range-filter .range-sep { color: #94a3b8; font-size: 12px; flex-shrink: 0; }
+  /* 값을 아직 안 고른 날짜 입력은 mm/dd/yyyy 같은 자리표시 텍스트 없이 달력
+     아이콘만 보이게 — 선택하면 JS가 has-value 클래스를 붙여 글자가
+     다시 보이게 한다(레이아웃 크기는 그대로, 글자 색만 바뀌므로 클릭 영역은
+     변하지 않음). -webkit- 전용 의사 엘리먼트라 Chromium/Safari 계열에서만
+     적용되고, 지원 안 하는 브라우저에서는 그냥 평소처럼 텍스트가 보인다. */
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-text,
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-month-field,
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-day-field,
+  input[type="date"]:not(.has-value)::-webkit-datetime-edit-year-field {
+    color: transparent;
+  }
   td.select-cell, th.select-th { width: 28px; padding: 4px 6px; }
   #detail-panel canvas { display: block; margin: 10px 0; }
   #detail-panel .cmp-legend { display: flex; gap: 10px; font-size: 11px; color: #64748b; flex-wrap: wrap; margin-bottom: 6px; }
@@ -154,6 +167,7 @@
         <th class="select-th"></th>
         <th class="date-range-filter">
           <input type="date" data-col="ts-start" aria-label="시작">
+          <span class="range-sep">~</span>
           <input type="date" data-col="ts-end" aria-label="종료">
         </th>
         <th><input type="text" data-col="mined" placeholder="검색..."></th>
@@ -654,8 +668,15 @@
     renderDetailPanelForSelection(lastPeriodCycles);
   }
 
+  // 날짜 입력은 값이 비어 있으면 has-value가 없어 위 CSS가 mm/dd/yyyy 텍스트를
+  // 숨긴다 — 값을 고르면 다시 보이게 클래스를 토글한다(초기 로드 시에도 한 번
+  // 맞춰둔다, 비록 지금은 항상 빈 값으로 시작하지만).
   document.querySelectorAll(".filter-row input[data-col]").forEach((input) => {
-    input.addEventListener("input", applyFiltersAndRender);
+    if (input.type === "date") input.classList.toggle("has-value", !!input.value);
+    input.addEventListener("input", () => {
+      if (input.type === "date") input.classList.toggle("has-value", !!input.value);
+      applyFiltersAndRender();
+    });
   });
   document.querySelectorAll(".filter-row select[data-col]").forEach((select) => {
     select.addEventListener("change", applyFiltersAndRender);
