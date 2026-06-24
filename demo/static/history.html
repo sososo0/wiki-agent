@@ -8,6 +8,42 @@
   header { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 16px; }
   header h2 { margin: 0; font-size: 18px; }
   header a { color: #2563eb; text-decoration: none; }
+  /* index.html과 동일한 갱신 알림 종 — graph.html과 같은 마크업/동작. */
+  #notif-wrap { margin-left: auto; position: relative; }
+  #notif-toggle {
+    border: 1px solid #e2e8f0; background: #fff; border-radius: 8px;
+    padding: 5px 11px; font-size: 13px; cursor: pointer; color: #374151;
+    position: relative;
+  }
+  #notif-toggle:hover { background: #f1f5f9; }
+  #notif-badge {
+    position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px;
+    background: #ef4444; color: #fff; border-radius: 999px; font-size: 10px;
+    line-height: 16px; text-align: center; padding: 0 3px; display: none;
+  }
+  #notif-badge.show { display: block; }
+  #notif-panel {
+    display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 20;
+    width: 340px; max-height: 420px; overflow-y: auto;
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08); padding: 6px;
+  }
+  #notif-panel.open { display: block; }
+  #notif-panel .empty { padding: 14px; font-size: 13px; color: #94a3b8; text-align: center; }
+  .notif-item {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 10px; border-radius: 8px; font-size: 13px; color: #1f2937;
+  }
+  .notif-item:hover { background: #f1f5f9; }
+  .notif-item.unread { background: #eff6ff; }
+  .notif-item .row { display: flex; align-items: center; gap: 6px; }
+  .notif-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .notif-item .dot.info { background: #2563eb; }
+  .notif-item .dot.warning { background: #f59e0b; }
+  .notif-item .dot.error { background: #ef4444; }
+  .notif-item .title { font-weight: 600; }
+  .notif-item .message { margin: 4px 0 0; color: #374151; line-height: 1.4; }
+  .notif-item .meta { font-size: 11px; color: #94a3b8; margin-top: 4px; }
   #info {
     border-bottom: 1px solid #e2e8f0; padding: 16px 20px; background: #f8fafc;
     font-size: 13px; color: #374151; line-height: 1.6;
@@ -92,6 +128,10 @@
   <h2>wiki-agent 사이클 추이</h2>
   <a href="/">← 채팅으로</a>
   <a href="/static/graph.html">📊 그래프 보기</a>
+  <div id="notif-wrap">
+    <button id="notif-toggle" type="button">🔔<span id="notif-badge"></span></button>
+    <div id="notif-panel"></div>
+  </div>
 </header>
 <div id="info">
   <p>
@@ -705,6 +745,96 @@
 
     applyFiltersAndRender();
   }
+
+  // index.html/graph.html과 동일한 갱신 알림 종. 시각 표시는 이 파일에 이미
+  // 있는 fmtTime(날짜+시각 한 줄)을 재사용.
+  const notifToggle = document.getElementById("notif-toggle");
+  const notifPanel = document.getElementById("notif-panel");
+  const notifBadge = document.getElementById("notif-badge");
+
+  function closeNotifPanel() {
+    notifPanel.classList.remove("open");
+  }
+
+  async function refreshNotifBadge() {
+    try {
+      const resp = await fetch("/notifications");
+      const data = await resp.json();
+      if (data.unread_count > 0) {
+        notifBadge.textContent = data.unread_count > 99 ? "99+" : data.unread_count;
+        notifBadge.classList.add("show");
+      } else {
+        notifBadge.classList.remove("show");
+      }
+      return data.notifications || [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function openNotifPanel() {
+    notifPanel.classList.add("open");
+    notifPanel.innerHTML = '<div class="empty">불러오는 중...</div>';
+    const items = await refreshNotifBadge();
+
+    if (!items.length) {
+      notifPanel.innerHTML = '<div class="empty">알림이 없습니다.</div>';
+      return;
+    }
+
+    notifPanel.innerHTML = "";
+    for (const n of items) {
+      const btn = document.createElement("button");
+      btn.className = "notif-item" + (n.read ? "" : " unread");
+      const row = document.createElement("div");
+      row.className = "row";
+      const dot = document.createElement("span");
+      dot.className = `dot ${n.level}`;
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "title";
+      titleSpan.textContent = n.title;
+      row.append(dot, titleSpan);
+      const messageDiv = document.createElement("div");
+      messageDiv.className = "message";
+      messageDiv.textContent = n.message;
+      const metaDiv = document.createElement("div");
+      metaDiv.className = "meta";
+      metaDiv.textContent = fmtTime(n.created_at);
+      btn.append(row, messageDiv, metaDiv);
+      btn.addEventListener("click", async () => {
+        if (!n.read) {
+          const adminToken = localStorage.getItem("wiki_agent_admin_token");
+          const resp = await fetch(`/notifications/${n.id}/read`, {
+            method: "POST",
+            headers: adminToken ? { "X-Admin-Token": adminToken } : {},
+          });
+          if (resp.ok) {
+            btn.classList.remove("unread");
+            n.read = 1;
+            refreshNotifBadge();
+          }
+        }
+      });
+      notifPanel.appendChild(btn);
+    }
+  }
+
+  notifToggle.addEventListener("click", () => {
+    if (notifPanel.classList.contains("open")) {
+      closeNotifPanel();
+    } else {
+      openNotifPanel();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!notifPanel.contains(e.target) && e.target !== notifToggle) {
+      closeNotifPanel();
+    }
+  });
+
+  refreshNotifBadge();
+  setInterval(refreshNotifBadge, 60000);
 
   main();
 </script>
