@@ -326,11 +326,5 @@ hermes cron add --schedule "0 2 * * *" --cmd "python scripts/run_update_cycle.py
 - **shadow/active 분리 생략** → 나쁜 갱신이 prod 직격. 승격 게이트는 필수.
 - **자율 에이전트 격리 소홀** → 코드 실행 권한을 갖는 런타임이므로 컨테이너/권한 격리 필수.
 
----
-
-## 부록 — README 첫 문단 초안
-
-> **wiki-agent** — 사용자와 에이전트의 대화 로그를 분석해 지식베이스를 스스로 갱신하는
-> self-improving RAG. 정적 RAG와 달리 운영 중 발생하는 질문·실패·정정을 마이닝해
-> 위키를 갱신하고, 오염 방지 게이트와 평가 기반 승격으로 안전하게 반영한다.
-> 서빙은 Hermes Agent(MCP) 위에, 핵심 갱신 파이프라인은 자체 구현.
+> 위 부록(README 첫 문단 초안)은 실제 README 작성 전 메모였고, README가 이미 완성돼
+> 정리 시 제거함.

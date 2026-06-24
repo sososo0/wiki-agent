@@ -9,6 +9,7 @@
 - 설계:   docs/self-updating-rag-design.md
 - 구현순서: docs/wiki-agent-implementation-guide.md 
 - 서빙연결: docs/RUNBOOK-mcp-hermes.md
+- 데모 운영 디테일(요청제한/보안/알림/그래프/평가 사례): docs/demo-operations.md
 
 ## 이미 구현됨 — 재작성 금지, 위에서 빌드
 core/wiki_store.py, serving/mcp_server.py, test_client.py (서빙 레이어 완료)
@@ -21,7 +22,7 @@ core/graph.py(위키 그래프 읽기 전용 파생 뷰), demo/static/graph.html
 - DE 로직(mine/curate/gate)은 Hermes 스킬/도구로 구현 위임 가능. 단, 적용 전 사람 코드리뷰 필수.
 - 에이전트는 KB에 직접 못 씀: MCP로 쓰기 도구(add_entry 등) 노출 금지.
 - 갱신 patch는 shadow로만 반영. eval 회귀 없을 때만 active 승격, 회귀 시 롤백.
-- agent_generated 엔트리는 검증 소스 없이 active 승격 금지.
+- agent_generated/curated_from_web 엔트리는 검증 소스 없이 active 승격 금지.
 - DB 경로는 WIKI_AGENT_DB(절대경로)로 주입. 하드코딩 금지.
 
 ## 명령
