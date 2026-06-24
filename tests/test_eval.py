@@ -17,7 +17,8 @@ sys.path.insert(0, str(ROOT))
 
 import pytest
 
-from eval.run_eval import evaluate, load_gold, GOLD_PATH
+from eval import run_eval
+from eval.run_eval import evaluate, load_gold, GOLD_PATH, generate, judge_answer, judge_escalation, judge_quality
 
 # 골드셋이 참조할 수 있는 entry_id 네임스페이스: 시드(wiki_000N) +
 # 파이프라인이 실제로 생성하는 두 접두사(core/pipeline/curate.py의
@@ -160,6 +161,83 @@ def test_evaluate_qualitative_true_adds_rubric_averages_and_report():
     assert len(scores["qualitative_report"]) == 2
     assert scores["qualitative_report"][0]["q"] == "q1"
     assert scores["qualitative_report"][0]["rationale"] == "r1"
+
+
+class _RaisingMessages:
+    def create(self, **kwargs):
+        raise RuntimeError("simulated API failure")
+
+
+class _RaisingClient:
+    def __init__(self):
+        self.messages = _RaisingMessages()
+
+
+class _FakeBlock:
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class _FakeResponse:
+    def __init__(self, text):
+        self.content = [_FakeBlock(text)]
+
+
+class _StubMessages:
+    def __init__(self, text):
+        self._text = text
+
+    def create(self, **kwargs):
+        return _FakeResponse(self._text)
+
+
+class _StubClient:
+    def __init__(self, text):
+        self.messages = _StubMessages(text)
+
+
+_EX = {"q": "q1", "gold_answer": "a", "must_contain": []}
+
+
+def test_generate_returns_error_sentinel_when_api_call_fails(monkeypatch):
+    monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _RaisingClient())
+
+    answer = generate("q1", [{"entry_id": "wiki_0001", "topic": "t", "canonical": "c"}])
+
+    assert "error" in answer.lower()
+
+
+def test_judge_answer_returns_0_when_api_call_fails(monkeypatch):
+    monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _RaisingClient())
+
+    assert judge_answer("some answer", _EX) == 0
+
+
+def test_judge_escalation_returns_0_when_api_call_fails(monkeypatch):
+    monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _RaisingClient())
+
+    assert judge_escalation("some answer", _EX) == 0
+
+
+def test_judge_quality_returns_min_scores_when_api_call_fails(monkeypatch):
+    monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _RaisingClient())
+
+    result = judge_quality("some answer", _EX)
+
+    assert result == {"groundedness": 1, "completeness": 1, "relevance": 1,
+                       "rationale": "judge call failed: simulated API failure"}
+
+
+def test_judge_quality_returns_min_scores_when_response_is_not_json(monkeypatch):
+    monkeypatch.setattr(run_eval, "_anthropic_client", lambda: _StubClient("not valid json"))
+
+    result = judge_quality("some answer", _EX)
+
+    assert result["groundedness"] == 1
+    assert result["completeness"] == 1
+    assert result["relevance"] == 1
+    assert "judge call failed" in result["rationale"]
 
 
 @pytest.mark.skipif(

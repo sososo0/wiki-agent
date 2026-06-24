@@ -313,12 +313,20 @@ def generate(
         '그대로 복사하지 말고 짧은 한국어 설명을 덧붙일 것 — 예: \'Rate limiting '
         '(요청 빈도 제한)\'>", "..."]} (2-4개 선택지)'
     )
-    resp = _anthropic_client().messages.create(
-        model=model,
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = next((b.text for b in resp.content if b.type == "text"), "")
+    try:
+        resp = _anthropic_client().messages.create(
+            model=model,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = next((b.text for b in resp.content if b.type == "text"), "")
+    except Exception:  # noqa: BLE001 - API 호출 실패를 처리 안 된 500으로 노출하면 안 됨
+        logger.exception("generate() Anthropic 호출 실패")
+        return {
+            "type": "answer",
+            "answer": "답변 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+            "entry_ids_used": [h["entry_id"] for h in hits],
+        }
     try:
         data = json.loads(_extract_json_object(text))
     except (json.JSONDecodeError, ValueError):
@@ -358,18 +366,23 @@ def generate(
 
 def generate_title(query: str, model: str = DEMO_MODEL) -> str:
     """대화의 첫 질문을 짧은 제목으로 요약(첫 턴에만 호출, Claude/ChatGPT 스타일
-    "이전 대화" 목록 표시용)."""
+    "이전 대화" 목록 표시용). API 호출이 실패해도(백그라운드 태스크라 응답은
+    이미 나갔지만) query[:40]로 조용히 폴백 — 제목은 필수가 아니므로."""
     prompt = (
         "Summarize the following user question as a short conversation "
         "title (6 words or fewer, same language as the question, no "
         "quotes, no trailing period).\n\nQuestion: " + query
     )
-    resp = _anthropic_client().messages.create(
-        model=model,
-        max_tokens=30,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    title = next((b.text for b in resp.content if b.type == "text"), "").strip()
+    try:
+        resp = _anthropic_client().messages.create(
+            model=model,
+            max_tokens=30,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        title = next((b.text for b in resp.content if b.type == "text"), "").strip()
+    except Exception:  # noqa: BLE001 - 제목 생성 실패가 백그라운드 태스크를 깨면 안 됨
+        logger.exception("generate_title() Anthropic 호출 실패")
+        title = ""
     return title or query[:40]
 
 

@@ -231,11 +231,17 @@ def main():
             use_web_search=args.use_web_search,
             web_search_daily_cap=args.web_search_daily_cap,
         )
-    except Exception as e:
+    except Exception:
         # 사이클이 죽어도 종모양 알림으로 보여야 한다 — hermes cron 로그만 보는
         # 사람은 거의 없으니 데모 UI에도 남긴다. 삼키지 않고 그대로 재raise해
-        # hermes cron 자체의 실패 상태(`hermes cron list`)도 정상적으로 남게 한다.
-        wiki_store.add_notification("error", "갱신 사이클 실패", str(e))
+        # hermes cron 자체의 실패 상태(`hermes cron list`)도 정상적으로 남게
+        # 하고, 그 재raise된 예외의 전체 traceback이 cron 로그에 남으므로 거기서
+        # 상세를 본다 — str(e)를 notifications에 그대로 저장하면 인증 없는
+        # GET /notifications(demo/app.py)를 통해 누구나 내부 에러 메시지(경로,
+        # 내부 상태 등)를 볼 수 있어 일부러 제네릭한 문구만 남긴다.
+        wiki_store.add_notification(
+            "error", "갱신 사이클 실패",
+            "갱신 사이클이 예외로 중단되었습니다. 자세한 내용은 cron 로그를 확인하세요.")
         raise
 
     print(f"mined gaps: {result['mined']}")

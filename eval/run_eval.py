@@ -56,7 +56,12 @@ def load_gold(path=GOLD_PATH):
 
 
 def generate(query, hits, model=GEN_MODEL):
-    """검색된 entry만 근거로 답변 생성 (서빙 에이전트의 grounded 답변을 흉내)."""
+    """검색된 entry만 근거로 답변 생성 (서빙 에이전트의 grounded 답변을 흉내).
+
+    API 호출 자체가 실패하면(네트워크/레이트리밋 등) 예외를 그대로 전파하지
+    않는다 — 그러면 judge_fn이 빈/오류 텍스트를 보고 자연스럽게 "정답 아님"으로
+    판정해(fail-closed) 그 한 문항만 틀린 것으로 처리되고, 골드셋 전체를 도는
+    evaluate()/갱신 사이클이 죽지 않는다."""
     if not hits:
         return "I don't have information to answer this."
     context = "\n".join(
@@ -68,16 +73,24 @@ def generate(query, hits, model=GEN_MODEL):
         "say you don't know.\n\n"
         f"Wiki entries:\n{context}\n\nQuestion: {query}"
     )
-    resp = _anthropic_client().messages.create(
-        model=model,
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        resp = _anthropic_client().messages.create(
+            model=model,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:  # noqa: BLE001 - API 호출 실패가 평가 전체를 막으면 안 됨
+        return f"[error: answer generation failed: {e}]"
     return next((b.text for b in resp.content if b.type == "text"), "")
 
 
 def judge_answer(answer, ex, model=JUDGE_MODEL):
-    """LLM-as-judge: 답변이 gold_answer/must_contain 기준을 충족하면 1, 아니면 0."""
+    """LLM-as-judge: 답변이 gold_answer/must_contain 기준을 충족하면 1, 아니면 0.
+
+    judge 호출 자체가 실패하면(네트워크/레이트리밋 등) 0(불일치)으로 fail-closed
+    처리한다 — core/pipeline/gate.py의 default_judge_fn이 판정 불가 시
+    score=0.0으로 떨어지는 것과 동일 철학. 예외를 그대로 던지면 evaluate()가
+    골드셋 중간에 죽어 갱신 사이클 전체(promote_if_better)가 멈춘다."""
     prompt = (
         "You are grading a candidate answer against a reference answer for "
         "a knowledge-base Q&A system. Judge only factual correctness and "
@@ -89,18 +102,22 @@ def judge_answer(answer, ex, model=JUDGE_MODEL):
         "Does the candidate answer correctly convey the reference answer and "
         "cover the required points? Reply with exactly one word: \"yes\" or \"no\"."
     )
-    resp = _anthropic_client().messages.create(
-        model=model,
-        max_tokens=5,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        resp = _anthropic_client().messages.create(
+            model=model,
+            max_tokens=5,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception:  # noqa: BLE001 - judge 호출 실패가 평가 전체를 막으면 안 됨
+        return 0
     text = next((b.text for b in resp.content if b.type == "text"), "")
     return 1 if text.strip().lower().startswith("yes") else 0
 
 
 def judge_escalation(answer, ex, model=JUDGE_MODEL):
     """LLM-as-judge: KB가 답을 모르는 질문에 모델이 모른다고 적절히 인정했는가,
-    아니면 구체적이지만 근거 없는 답을 지어냈는가(yes=올바르게 모른다고 함)."""
+    아니면 구체적이지만 근거 없는 답을 지어냈는가(yes=올바르게 모른다고 함).
+    judge_answer와 동일하게 호출 실패는 0(fail-closed)으로 처리한다."""
     prompt = (
         "You are grading whether an AI correctly declined to answer because "
         "its knowledge base had no relevant information, instead of "
@@ -111,11 +128,14 @@ def judge_escalation(answer, ex, model=JUDGE_MODEL):
         "have the information, rather than inventing a confident specific "
         "answer? Reply with exactly one word: \"yes\" or \"no\"."
     )
-    resp = _anthropic_client().messages.create(
-        model=model,
-        max_tokens=5,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        resp = _anthropic_client().messages.create(
+            model=model,
+            max_tokens=5,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception:  # noqa: BLE001 - judge 호출 실패가 평가 전체를 막으면 안 됨
+        return 0
     text = next((b.text for b in resp.content if b.type == "text"), "")
     return 1 if text.strip().lower().startswith("yes") else 0
 
@@ -131,7 +151,11 @@ def _extract_json_object(text: str) -> str:
 def judge_quality(answer, ex, model=JUDGE_MODEL):
     """LLM-as-judge: judge_answer의 binary yes/no 대신 groundedness(근거 충실도)/
     completeness(필수 포인트 커버리지)/relevance(질문 적합도)를 1-5로 채점하고
-    rationale을 받는다. judge_answer와 동일하게 LLM 호출 1회."""
+    rationale을 받는다. judge_answer와 동일하게 LLM 호출 1회.
+
+    API 호출 실패 또는 judge가 JSON이 아닌 응답을 줘도(둘 다 동일하게 "판정
+    불가") 예외를 던지지 않고 최저점(1)으로 fail-closed 처리한다 — --qualitative
+    리포트 한 문항이 깨지는 것과 evaluate() 전체가 죽는 것은 비용이 다르다."""
     prompt = (
         "You are grading a candidate answer against a reference answer for "
         "a knowledge-base Q&A system, on three 1-5 dimensions:\n"
@@ -149,13 +173,17 @@ def judge_quality(answer, ex, model=JUDGE_MODEL):
         '{"groundedness": <1-5>, "completeness": <1-5>, "relevance": <1-5>, '
         '"rationale": "one short sentence"}'
     )
-    resp = _anthropic_client().messages.create(
-        model=model,
-        max_tokens=200,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = next((b.text for b in resp.content if b.type == "text"), "")
-    return json.loads(_extract_json_object(text))
+    try:
+        resp = _anthropic_client().messages.create(
+            model=model,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = next((b.text for b in resp.content if b.type == "text"), "")
+        return json.loads(_extract_json_object(text))
+    except Exception as e:  # noqa: BLE001 - API/파싱 실패가 평가 전체를 막으면 안 됨
+        return {"groundedness": 1, "completeness": 1, "relevance": 1,
+                "rationale": f"judge call failed: {e}"}
 
 
 def evaluate(

@@ -406,6 +406,42 @@ def test_generate_keeps_clarify_type_when_model_gives_no_options(monkeypatch):
     assert result["options"] == []
 
 
+def test_generate_falls_back_to_error_message_when_api_call_raises(monkeypatch):
+    """일시적 네트워크/레이트리밋 오류로 Anthropic 호출 자체가 실패해도, 처리
+    안 된 500이 사용자에게 노출되는 대신 안내 문구로 폴백해야 한다."""
+    class _RaisingMessages:
+        def create(self, **kwargs):
+            raise RuntimeError("simulated API failure")
+
+    class _RaisingClient:
+        messages = _RaisingMessages()
+
+    monkeypatch.setattr(demo_app, "_anthropic_client", lambda: _RaisingClient())
+
+    result = demo_app.generate(
+        "질문", [{"entry_id": "wiki_1", "topic": "t", "canonical": "c"}],
+    )
+
+    assert result["type"] == "answer"
+    assert "오류" in result["answer"]
+    assert result["entry_ids_used"] == ["wiki_1"]
+
+
+def test_generate_title_falls_back_to_truncated_query_when_api_call_raises(monkeypatch):
+    class _RaisingMessages:
+        def create(self, **kwargs):
+            raise RuntimeError("simulated API failure")
+
+    class _RaisingClient:
+        messages = _RaisingMessages()
+
+    monkeypatch.setattr(demo_app, "_anthropic_client", lambda: _RaisingClient())
+
+    title = demo_app.generate_title("아주 긴 질문이라고 가정해보자")
+
+    assert title == "아주 긴 질문이라고 가정해보자"[:40]
+
+
 def test_chat_blocks_llm_call_when_per_ip_daily_budget_exhausted(client, monkeypatch):
     """conv_id를 바꿔도 같은 IP면 IP 일일 한도에 걸려야 한다 — conv_id는
     클라이언트가 임의로 새로 만들 수 있는 값이라, 대화당 한도만으로는

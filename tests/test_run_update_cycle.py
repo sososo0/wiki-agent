@@ -249,7 +249,11 @@ def test_summary_notifications_no_warning_when_nothing_mined_and_not_promoted():
 
 def test_run_cycle_writes_error_notification_and_reraises_on_crash(tmp_path, monkeypatch):
     """사이클이 예외로 죽어도 종모양 알림에 남아야 한다 — 삼키지 않고
-    그대로 재raise해 hermes cron 자체의 실패 상태도 정상적으로 남아야 함."""
+    그대로 재raise해 hermes cron 자체의 실패 상태도 정상적으로 남아야 함.
+
+    notifications 메시지에는 예외 내용(str(e))을 그대로 담지 않는다 — GET
+    /notifications가 인증 없이 공개돼 있어, 내부 에러 상세가 그대로 노출되면
+    정보 유출이 된다. 상세는 재raise된 예외의 traceback(cron 로그)에서 본다."""
     import pytest
 
     db_path = str(tmp_path / "test_run_cycle_crash_wiki.db")
@@ -260,7 +264,7 @@ def test_run_cycle_writes_error_notification_and_reraises_on_crash(tmp_path, mon
     from scripts import run_update_cycle
 
     def _broken_run_cycle(**kwargs):
-        raise RuntimeError("boom")
+        raise RuntimeError("boom: /secret/internal/path leaked")
 
     monkeypatch.setattr(run_update_cycle, "run_cycle", _broken_run_cycle)
     monkeypatch.setattr(sys, "argv", ["run_update_cycle.py"])
@@ -271,4 +275,6 @@ def test_run_cycle_writes_error_notification_and_reraises_on_crash(tmp_path, mon
     notes = wiki_store.list_notifications()
     assert len(notes) == 1
     assert notes[0]["level"] == "error"
-    assert "boom" in notes[0]["message"]
+    assert "boom" not in notes[0]["message"]
+    assert "/secret/internal/path" not in notes[0]["message"]
+    assert notes[0]["message"]  # 그래도 사용자가 알아챌 수 있는 안내 문구는 있어야 함
