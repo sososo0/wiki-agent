@@ -175,12 +175,46 @@ demo-operations.md 참고), 원하면 같은 방식으로 별도 cron 줄을 추
 0 4 * * * docker exec -w /app -e WIKI_AGENT_DB=/data/wiki_agent.db wiki-agent python scripts/backup_db.py
 ```
 
-## 코드 갱신 시(재배포)
+## Step 11 — 코드 갱신 시(재배포): GitHub Actions 자동화
+
+`main`에 push되면(PR 머지 포함) `.github/workflows/deploy-ec2.yml`이 SSH로 이 박스에
+접속해 `git pull --ff-only && bash scripts/deploy_ec2.sh`를 실행한다 — 아래 수동
+절차를 그대로 원격에서 트리거하는 것뿐, 별도 빌드 서버나 컨테이너 레지스트리
+(ECR 등)는 쓰지 않는다(이 박스 자체가 빌드 호스트).
+
+`scripts/deploy_ec2.sh`가 하는 일(Step 2/4와 동일한 순서):
+1. 새 이미지를 먼저 빌드(`docker build`) — 실패하면 여기서 멈추고 기존 컨테이너는
+   그대로 떠 있다(다운타임 없음).
+2. 빌드 성공 후에만 기존 컨테이너 stop/rm, 새 컨테이너 run(`-v ~/wiki-agent-data:/data`
+   동일 볼륨이라 DB는 그대로 유지).
+3. `http://localhost:8000/`이 200을 반환할 때까지 최대 30초 재시도 — 실패하면
+   워크플로가 실패 처리되어 Actions 탭에서 바로 보임(`docker logs wiki-agent`로
+   원인 확인).
+
+**자동화 범위 밖**: `run_update_cycle.py`(Step 9 cron), `ingest_doc.py`(Step 5),
+`translate_wiki_labels.py`(Step 6)는 이 워크플로가 절대 호출하지 않는다 — 코드
+배포와 위키 콘텐츠 파이프라인은 별개이며, 매 push마다 LLM을 호출하는 사고를
+막기 위해 의도적으로 분리했다.
+
+필요한 GitHub repo secrets(Settings → Secrets and variables → Actions):
+
+| Secret | 값 |
+|---|---|
+| `EC2_HOST` | EC2 퍼블릭 IP |
+| `EC2_USER` | `ec2-user` |
+| `EC2_SSH_KEY` | Step 1에서 쓴 키페어의 **private key** 전체 내용(PEM) |
+
+AWS IAM 자격증명은 필요 없다(이 인스턴스에 IAM role 자체가 없음, 메타데이터
+엔드포인트 404로 이미 확인됨) — 워크플로는 평범한 SSH 접속만 한다.
+
+수동으로 같은 절차를 돌리고 싶을 때(또는 워크플로 없이 디버그할 때), 박스에
+SSH로 직접 들어가서:
 
 ```bash
 cd ~/wiki-agent
 git pull
-docker build -t wiki-agent:v1 -f Dockerfile .
-docker stop wiki-agent && docker rm wiki-agent
-# Step 4의 docker run 명령을 그대로 다시 실행 — 같은 -v 볼륨이라 DB는 유지됨
+bash scripts/deploy_ec2.sh
 ```
+
+> Actions 탭에서 수동 재실행이 필요하면(예: `.env`만 바꾸고 코드는 안 바꼈을 때)
+> "Run workflow" 버튼(`workflow_dispatch`)으로 커밋 없이 트리거 가능.
