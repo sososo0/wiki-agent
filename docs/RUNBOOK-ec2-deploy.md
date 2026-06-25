@@ -99,13 +99,29 @@ docker exec -w /app wiki-agent python scripts/ingest_doc.py data/corpus --dry-ru
 > DB는 영속 볼륨에 남으므로, "코드 갱신 시(재배포)" 절차로 컨테이너를 새로 띄워도
 > 이 단계를 다시 실행할 필요는 없다(문서 자체가 바뀌었을 때만 다시 돌리면 됨).
 
-## Step 6 — 보안 그룹 확인 (AWS 콘솔에서)
+## Step 6 — 그래프 한글 번역 캐시 생성 (선택)
+
+`/static/graph.html`은 기본이 원문(영어) 표시다. 한글로 보려면
+`scripts/translate_wiki_labels.py`를 실행해 `translation_cache` 테이블에 번역을
+미리 만들어둬야 한다 — 원본 `wiki_entry`(topic/canonical/body_md)는 검색/평가가
+의존하므로 건드리지 않고, 표시용 캐시만 따로 둔다.
+
+```bash
+docker exec -w /app wiki-agent python scripts/translate_wiki_labels.py
+```
+
+`entry_id`+`version` 기준으로 캐시 적중하면 재번역하지 않으므로(Step 5의 ingestion과
+동일한 멱등 철학), 위키 콘텐츠가 새로 추가되거나 바뀔 때마다(Step 5 재실행 후, 또는
+Step 9의 갱신 사이클 이후) 다시 돌려줘야 새 항목도 한글로 보인다. 캐시가 없거나
+오래된 항목은 프론트가 자연스럽게 영어로 폴백한다.
+
+## Step 7 — 보안 그룹 확인 (AWS 콘솔에서)
 
 이 인스턴스의 보안 그룹 인바운드 규칙에 **TCP 8000**이 열려 있는지 확인할 것
 (0.0.0.0/0으로 전체 공개하거나, 필요하면 특정 IP만). 22(SSH)는 이미 접속에
 썼으니 열려 있을 것이다.
 
-## Step 7 — 동작 확인
+## Step 8 — 동작 확인
 
 ```bash
 curl http://localhost:8000/                 # 인스턴스 안에서
@@ -113,7 +129,7 @@ curl http://localhost:8000/                 # 인스턴스 안에서
 docker logs -f wiki-agent                    # 문제 생기면 로그 확인
 ```
 
-## Step 8 — 갱신 사이클 cron 등록 (launchd 대체)
+## Step 9 — 갱신 사이클 cron 등록 (launchd 대체)
 
 `docker exec`은 `docker run` 때 준 환경변수(`WIKI_AGENT_DB`, `ANTHROPIC_API_KEY`)를
 그대로 물려받으므로 따로 다시 안 줘도 된다. crontab 한 줄에 타임스탬프 로그 파일명을
@@ -146,7 +162,7 @@ crontab에 한 줄 추가(6시간마다 — 00:00/06:00/12:00/18:00):
 > 없다 — 평범한 Linux cron이라 사이클이 오래 걸려도(LLM 호출 포함) 안전하게
 > 끝까지 돈다.
 
-## Step 9 — (선택) 로그 retention / DB 백업도 같은 패턴으로
+## Step 10 — (선택) 로그 retention / DB 백업도 같은 패턴으로
 
 데이터 삭제는 되돌릴 수 없어 cron에 조용히 끼워넣지 않는 게 원칙이지만(README/
 demo-operations.md 참고), 원하면 같은 방식으로 별도 cron 줄을 추가:
