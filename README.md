@@ -93,6 +93,10 @@ docker run -d --name wiki-agent-demo -p 8000:8000 \
 항목을 검색해 바로 포커스할 수 있고, 노드나 엣지를 클릭하면 우측 패널에 상세
 정보가 뜬다. 채팅의 출처 링크로 들어오면 해당 항목이 자동으로 포커스된다.
 
+기본은 원문(영어) 표시이며, 한글로 보려면 `python scripts/translate_wiki_labels.py`로
+번역 캐시를 먼저 생성해야 한다(원본 엔트리는 그대로 두고 표시용 캐시만 따로 만듦 —
+검색/평가는 영어 원문에 의존하므로 건드리지 않음).
+
 ### 사이클 추이 (`/static/history.html`)
 
 갱신 사이클(`scripts/run_update_cycle.py`)이 돌 때마다 그 시점 위키 상태의
