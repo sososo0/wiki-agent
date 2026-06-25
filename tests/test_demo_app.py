@@ -525,9 +525,9 @@ def test_chat_blocks_llm_call_when_per_ip_daily_budget_exhausted(client, monkeyp
 
 
 def test_burst_limit_blocks_rapid_requests_across_any_endpoint(client, monkeypatch):
-    """버스트 한도는 /chat뿐 아니라 모든 엔드포인트에 미들웨어로 걸려야 한다 —
-    검색/그래프 연산도 서버 CPU 비용이 있어서 LLM 호출 여부와 무관하게 막아야
-    하기 때문."""
+    """버스트 한도는 /chat뿐 아니라 /static/*을 제외한 모든 엔드포인트에 미들웨어로
+    걸려야 한다 — 검색/그래프 연산도 서버 CPU 비용이 있어서 LLM 호출 여부와 무관하게
+    막아야 하기 때문."""
     monkeypatch.setattr(demo_app, "BURST_LIMIT", 2)
 
     ok1 = client.get("/history/some-conv")
@@ -538,6 +538,17 @@ def test_burst_limit_blocks_rapid_requests_across_any_endpoint(client, monkeypat
     assert ok2.status_code == 200
     assert blocked.status_code == 429
     assert "Retry-After" in blocked.headers
+
+
+def test_burst_limit_exempts_static_files(client, monkeypatch):
+    """/static/*은 CPU/임베딩 비용이 없는 정적 파일 서빙이라 버스트 집계에서
+    빠져야 한다 — 그래프/채팅 페이지 로딩 시 한꺼번에 나가는 스크립트 요청들이
+    /graph·/chat 같은 비용 있는 경로의 예산을 갉아먹지 않아야 하기 때문."""
+    monkeypatch.setattr(demo_app, "BURST_LIMIT", 2)
+
+    for _ in range(5):
+        resp = client.get("/static/index.html")
+        assert resp.status_code == 200
 
 
 def test_chat_rejects_oversized_message(client):

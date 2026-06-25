@@ -124,12 +124,18 @@ def _check_burst_limit(ip: str) -> bool:
 
 @app.middleware("http")
 async def _security_middleware(request: Request, call_next):
-    """모든 엔드포인트에 적용되는 기본 방어선 — 본문 크기 상한 + IP별 버스트 한도.
+    """기본 방어선 — 본문 크기 상한(모든 경로) + IP별 버스트 한도(/static/* 제외).
     라우트 핸들러보다 먼저 실행되므로 차단된 요청은 핸들러 코드를 타지 않는다."""
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > MAX_REQUEST_BODY_BYTES:
         logger.warning("요청 본문 크기 초과: %s bytes, path=%s", content_length, request.url.path)
         return JSONResponse(status_code=413, content={"detail": "요청 본문이 너무 큽니다."})
+
+    # /static/*은 CPU/임베딩 비용이 없는 순수 정적 파일 서빙이라 버스트 집계에서
+    # 뺀다 — 그래프/채팅 페이지 하나만 열어도 JS 파일 여러 개가 한꺼번에 요청돼
+    # /graph·/chat 같은 비용 있는 경로의 예산을 정상 사용만으로 다 써버렸었다.
+    if request.url.path.startswith("/static/"):
+        return await call_next(request)
 
     ip = _client_ip(request)
     if not _check_burst_limit(ip):
